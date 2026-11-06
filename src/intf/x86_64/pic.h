@@ -1,5 +1,11 @@
-#pragma once
+#ifndef PIC_H
+#define PIC_H
 
-void pic_remap();
-void pic_eoi_master();
-void pic_eoi_slave();
+#include <stdint.h>
+
+void pic_init(void);
+void pic_remap(void);
+void pic_eoi_master(void);
+void pic_eoi_slave(void);
+
+#endif

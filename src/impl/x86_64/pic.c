@@ -22,56 +22,60 @@
 #define PIC_OFFSET_SLAVE 0x28
 
 void pic_eoi_master() {
-	port_outb(PORT_PIC1_COMMAND, PIC_EOI);
-	port_wait();
+    port_outb(PORT_PIC1_COMMAND, PIC_EOI);
+    port_wait();
 }
 
 void pic_eoi_slave() {
-	port_outb(PORT_PIC2_COMMAND, PIC_EOI);
-	port_wait();
+    port_outb(PORT_PIC2_COMMAND, PIC_EOI);
+    port_wait();
 }
 
 void pic_remap() {
-	// ICW1 - begin initialization sequence
-	port_outb(PORT_PIC1_COMMAND, ICW1_INIT | ICW1_HAS_ICW4); // master
-	port_wait();
-	port_outb(PORT_PIC2_COMMAND, ICW1_INIT | ICW1_HAS_ICW4); // slave
-	port_wait();
-	
-	// ICW2 - update interrupt vector offsets
-	port_outb(PORT_PIC1_DATA, PIC_OFFSET_MASTER);
-	port_wait();
-	port_outb(PORT_PIC2_DATA, PIC_OFFSET_SLAVE);
-	port_wait();
-	
-	// ICW3 - configure cascading between master and slave
-	port_outb(PORT_PIC1_DATA, ICW3_IRQ2_HAS_SLAVE);
-	port_wait();
-	port_outb(PORT_PIC2_DATA, IRQ2_SLAVE);
-	port_wait();
-	
-	// ICW4 - configure 8086 mode
-	port_outb(PORT_PIC1_DATA, ICW4_MODE_8086);
-	port_wait();
-	port_outb(PORT_PIC2_DATA, ICW4_MODE_8086);
-	port_wait();
-	
-	// Mask (ignore) all interrupts
-	port_outb(PORT_PIC1_DATA, 0xFF);
-	port_wait();
-	port_outb(PORT_PIC2_DATA, 0xFF);
-	port_wait();
-	
-	// Unmask desired interrupts
-	uint8_t mask_master = port_inb(PORT_PIC1_DATA);
-	uint8_t mask_slave = port_inb(PORT_PIC2_DATA);
-	mask_master &= ~(1 << IRQ1_KEYBOARD);
-	port_outb(PORT_PIC1_DATA, mask_master);
-	port_wait();
-	port_outb(PORT_PIC2_DATA, mask_slave);
-	port_wait();
-	
-	// Wait for outstanding interrupts to clear
-	pic_eoi_master();
-	pic_eoi_slave();
+
+    port_outb(PORT_PIC1_COMMAND, ICW1_INIT | ICW1_HAS_ICW4); // master
+    port_wait();
+    port_outb(PORT_PIC2_COMMAND, ICW1_INIT | ICW1_HAS_ICW4); // slave
+    port_wait();
+    
+
+    port_outb(PORT_PIC1_DATA, PIC_OFFSET_MASTER);
+    port_wait();
+    port_outb(PORT_PIC2_DATA, PIC_OFFSET_SLAVE);
+    port_wait();
+    
+ 
+    port_outb(PORT_PIC1_DATA, ICW3_IRQ2_HAS_SLAVE);
+    port_wait();
+    port_outb(PORT_PIC2_DATA, IRQ2_SLAVE);
+    port_wait();
+    
+    
+    port_outb(PORT_PIC1_DATA, ICW4_MODE_8086);
+    port_wait();
+    port_outb(PORT_PIC2_DATA, ICW4_MODE_8086);
+    port_wait();
+    
+    
+    port_outb(PORT_PIC1_DATA, 0xFF);
+    port_wait();
+    port_outb(PORT_PIC2_DATA, 0xFF);
+    port_wait();
+    
+    
+    uint8_t mask_master = port_inb(PORT_PIC1_DATA);
+    uint8_t mask_slave = port_inb(PORT_PIC2_DATA);
+    mask_master &= ~(1 << IRQ1_KEYBOARD);
+    port_outb(PORT_PIC1_DATA, mask_master);
+    port_wait();
+    port_outb(PORT_PIC2_DATA, mask_slave);
+    port_wait();
+    
+    
+    pic_eoi_master();
+    pic_eoi_slave();
+}
+
+void pic_init(void) {
+    pic_remap();
 }

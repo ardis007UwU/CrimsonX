@@ -1,31 +1,31 @@
 #include "keyboard.h"
 #include "x86_64/idt.h"
 #include "x86_64/ps2.h"
+#include "x86_64/pic.h"
 #include <stddef.h>
 
 static keyboard_handler_t current_handler = NULL;
 
-// The actual hardware interrupt hook that fires when a key is pressed
 static void idt_handler_keyboard_user() {
-    if (current_handler == NULL) return;
-
-    // Read the scancode from the physical PS/2 port (usually 0x60)
     uint8_t scancode = ps2_read_scan_code();
 
-    struct KeyboardEvent event;
-    if (scancode & 0x80) {
-        event.type = KEYBOARD_EVENT_TYPE_BREAK;
-        event.code = scancode & ~0x80;
-    } else {
-        event.type = KEYBOARD_EVENT_TYPE_MAKE;
-        event.code = scancode;
+    if (current_handler != NULL) {
+        struct KeyboardEvent event;
+        if (scancode & 0x80) {
+            event.type = KEYBOARD_EVENT_TYPE_BREAK;
+            event.code = scancode & ~0x80;
+        } else {
+            event.type = KEYBOARD_EVENT_TYPE_MAKE;
+            event.code = scancode;
+        }
+        current_handler(event);
     }
 
-    current_handler(event);
+    // Tells the PIC that interrupt handling is complete so it can fire again
+    pic_eoi_master();
 }
 
 void keyboard_init(void) {
-    // Hook our function into the CPU's IDT for the keyboard interrupt
     idt_set_handler_keyboard(idt_handler_keyboard_user);
     current_handler = NULL;
 }
@@ -34,7 +34,6 @@ void keyboard_set_handler(keyboard_handler_t handler) {
     current_handler = handler;
 }
 
-// --- Key Code Mappings ---
 #define KEY_CODE_A 0x1E
 #define KEY_CODE_B 0x30
 #define KEY_CODE_C 0x2E
@@ -65,7 +64,6 @@ void keyboard_set_handler(keyboard_handler_t handler) {
 #define KEY_CODE_ENTER 0x1C
 #define KEY_CODE_BACKSPACE 0x0E
 
-// --- Translator ---
 char to_ascii(uint16_t code) {
     switch (code) {
         case KEY_CODE_A: return 'A';
