@@ -1,6 +1,6 @@
-CrimsonX is an educational, custom-built 64-bit operating system kernel written from scratch in C and Assembly. It boots directly into long mode via GRUB and launches cxsh—a feature-rich terminal environment complete with raw PS/2 interrupt handling, multi-line string wrapping, text selection highlighting, clipboard operations, and an absolute-coordinate VGA text engine.
+CrimsonX is an educational, custom-built 64-bit operating system kernel written from scratch in C and Assembly. It boots directly into long mode via GRUB and launches cxsh a terminal environment complete with raw PS/2 interrupt handling, multi-line string wrapping, text selection highlighting, clipboard operations, and VGA text engine.
 
-Kernel & Hardware Drivers
+**Kernel & Hardware Drivers**
 
 x86_64 Long Mode: Fully operational 64-bit kernel execution environment.
 
