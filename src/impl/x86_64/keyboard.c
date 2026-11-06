@@ -9,22 +9,29 @@ static keyboard_handler_t current_handler = NULL;
 
 static uint8_t shift_l = 0;
 static uint8_t shift_r = 0;
+static uint8_t ctrl_l = 0;
 static uint8_t caps_lock = 0;
+static uint8_t is_e0 = 0;
 
 static void idt_handler_keyboard_user(void) {
     uint8_t scancode = ps2_read_scan_code();
 
+    if (scancode == 0xE0) {
+        is_e0 = 1;
+        pic_eoi_master();
+        return;
+    }
+
     uint8_t is_break = (scancode & 0x80) != 0;
     uint8_t code = scancode & ~0x80;
 
-   
     if (code == 0x2A) {
         shift_l = !is_break;
     } else if (code == 0x36) {
         shift_r = !is_break;
-    } 
-    // Toggle Caps Lock on key press (Make event)
-    else if (code == 0x3A && !is_break) {
+    } else if (code == 0x1D) {
+        ctrl_l = !is_break;
+    } else if (code == 0x3A && !is_break) {
         caps_lock = !caps_lock;
     }
 
@@ -32,9 +39,12 @@ static void idt_handler_keyboard_user(void) {
         struct KeyboardEvent event;
         event.type = is_break ? KEYBOARD_EVENT_TYPE_BREAK : KEYBOARD_EVENT_TYPE_MAKE;
         event.code = code;
+        event.ctrl = ctrl_l;
+        event.shift = (shift_l || shift_r);
         current_handler(event);
     }
 
+    is_e0 = 0;
     pic_eoi_master();
 }
 
@@ -43,7 +53,9 @@ void keyboard_init(void) {
     current_handler = NULL;
     shift_l = 0;
     shift_r = 0;
+    ctrl_l = 0;
     caps_lock = 0;
+    is_e0 = 0;
 }
 
 void keyboard_set_handler(keyboard_handler_t handler) {
@@ -55,7 +67,6 @@ char to_ascii(uint16_t code) {
 
     uint8_t shift_active = (shift_l || shift_r);
 
-    
     static const char ascii_nomod[58] = {
         0,    0,   '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
         '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
@@ -63,7 +74,6 @@ char to_ascii(uint16_t code) {
         '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,   '*', 0,   ' '
     };
 
-    
     static const char ascii_shift[58] = {
         0,    0,   '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
         '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
@@ -74,7 +84,6 @@ char to_ascii(uint16_t code) {
     char c_nomod = ascii_nomod[code];
     char c_shift = ascii_shift[code];
 
-    // For letters, Shift and Caps Lock invert each other
     if (c_nomod >= 'a' && c_nomod <= 'z') {
         if (shift_active ^ caps_lock) {
             return c_shift;
@@ -82,7 +91,6 @@ char to_ascii(uint16_t code) {
             return c_nomod;
         }
     } else {
-        // For numbers and symbols, only Shift matters
         if (shift_active) {
             return c_shift;
         } else {
