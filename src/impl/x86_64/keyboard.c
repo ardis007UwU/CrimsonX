@@ -3,98 +3,90 @@
 #include "x86_64/ps2.h"
 #include "x86_64/pic.h"
 #include <stddef.h>
+#include <stdint.h>
 
 static keyboard_handler_t current_handler = NULL;
 
-static void idt_handler_keyboard_user() {
+static uint8_t shift_l = 0;
+static uint8_t shift_r = 0;
+static uint8_t caps_lock = 0;
+
+static void idt_handler_keyboard_user(void) {
     uint8_t scancode = ps2_read_scan_code();
+
+    uint8_t is_break = (scancode & 0x80) != 0;
+    uint8_t code = scancode & ~0x80;
+
+   
+    if (code == 0x2A) {
+        shift_l = !is_break;
+    } else if (code == 0x36) {
+        shift_r = !is_break;
+    } 
+    // Toggle Caps Lock on key press (Make event)
+    else if (code == 0x3A && !is_break) {
+        caps_lock = !caps_lock;
+    }
 
     if (current_handler != NULL) {
         struct KeyboardEvent event;
-        if (scancode & 0x80) {
-            event.type = KEYBOARD_EVENT_TYPE_BREAK;
-            event.code = scancode & ~0x80;
-        } else {
-            event.type = KEYBOARD_EVENT_TYPE_MAKE;
-            event.code = scancode;
-        }
+        event.type = is_break ? KEYBOARD_EVENT_TYPE_BREAK : KEYBOARD_EVENT_TYPE_MAKE;
+        event.code = code;
         current_handler(event);
     }
 
-    // Tells the PIC that interrupt handling is complete so it can fire again
     pic_eoi_master();
 }
 
 void keyboard_init(void) {
     idt_set_handler_keyboard(idt_handler_keyboard_user);
     current_handler = NULL;
+    shift_l = 0;
+    shift_r = 0;
+    caps_lock = 0;
 }
 
 void keyboard_set_handler(keyboard_handler_t handler) {
     current_handler = handler;
 }
 
-#define KEY_CODE_A 0x1E
-#define KEY_CODE_B 0x30
-#define KEY_CODE_C 0x2E
-#define KEY_CODE_D 0x20
-#define KEY_CODE_E 0x12
-#define KEY_CODE_F 0x21
-#define KEY_CODE_G 0x22
-#define KEY_CODE_H 0x23
-#define KEY_CODE_I 0x17
-#define KEY_CODE_J 0x24
-#define KEY_CODE_K 0x25
-#define KEY_CODE_L 0x26
-#define KEY_CODE_M 0x32
-#define KEY_CODE_N 0x31
-#define KEY_CODE_O 0x18
-#define KEY_CODE_P 0x19
-#define KEY_CODE_Q 0x10
-#define KEY_CODE_R 0x13
-#define KEY_CODE_S 0x1F
-#define KEY_CODE_T 0x14
-#define KEY_CODE_U 0x16
-#define KEY_CODE_V 0x2F
-#define KEY_CODE_W 0x11
-#define KEY_CODE_X 0x2D
-#define KEY_CODE_Y 0x15
-#define KEY_CODE_Z 0x2C
-#define KEY_CODE_SPACE 0x39
-#define KEY_CODE_ENTER 0x1C
-#define KEY_CODE_BACKSPACE 0x0E
-
 char to_ascii(uint16_t code) {
-    switch (code) {
-        case KEY_CODE_A: return 'A';
-        case KEY_CODE_B: return 'B';
-        case KEY_CODE_C: return 'C';
-        case KEY_CODE_D: return 'D';
-        case KEY_CODE_E: return 'E';
-        case KEY_CODE_F: return 'F';
-        case KEY_CODE_G: return 'G';
-        case KEY_CODE_H: return 'H';
-        case KEY_CODE_I: return 'I';
-        case KEY_CODE_J: return 'J';
-        case KEY_CODE_K: return 'K';
-        case KEY_CODE_L: return 'L';
-        case KEY_CODE_M: return 'M';
-        case KEY_CODE_N: return 'N';
-        case KEY_CODE_O: return 'O';
-        case KEY_CODE_P: return 'P';
-        case KEY_CODE_Q: return 'Q';
-        case KEY_CODE_R: return 'R';
-        case KEY_CODE_S: return 'S';
-        case KEY_CODE_T: return 'T';
-        case KEY_CODE_U: return 'U';
-        case KEY_CODE_V: return 'V';
-        case KEY_CODE_W: return 'W';
-        case KEY_CODE_X: return 'X';
-        case KEY_CODE_Y: return 'Y';
-        case KEY_CODE_Z: return 'Z';
-        case KEY_CODE_SPACE: return ' ';
-        case KEY_CODE_ENTER: return '\n';
-        case KEY_CODE_BACKSPACE: return '\b';
-        default: return 0;
+    if (code > 0x39) return 0;
+
+    uint8_t shift_active = (shift_l || shift_r);
+
+    
+    static const char ascii_nomod[58] = {
+        0,    0,   '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+        '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+        0,    'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0,
+        '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,   '*', 0,   ' '
+    };
+
+    
+    static const char ascii_shift[58] = {
+        0,    0,   '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
+        '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
+        0,    'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,
+        '|',  'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,   '*', 0,   ' '
+    };
+
+    char c_nomod = ascii_nomod[code];
+    char c_shift = ascii_shift[code];
+
+    // For letters, Shift and Caps Lock invert each other
+    if (c_nomod >= 'a' && c_nomod <= 'z') {
+        if (shift_active ^ caps_lock) {
+            return c_shift;
+        } else {
+            return c_nomod;
+        }
+    } else {
+        // For numbers and symbols, only Shift matters
+        if (shift_active) {
+            return c_shift;
+        } else {
+            return c_nomod;
+        }
     }
 }
