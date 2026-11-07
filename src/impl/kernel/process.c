@@ -125,7 +125,7 @@ void process_print_list(void) {
     if (!task_list_head) return;
 
     print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
-    print_str("PID   STATE       STACK RSP\n");
+    print_str("PID   STATE       STACK POINTER\n");
     print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
 
     task_t* curr = task_list_head;
@@ -138,9 +138,13 @@ void process_print_list(void) {
         else if (curr->state == TASK_STATE_BLOCKED) print_str("BLOCKED     ");
         else print_str("DEAD        ");
 
-        print_str("0x");
-        print_uint64_dec((uint64_t)curr->kernel_stack);
-        print_str("\n");
+        if (curr->id == 0) {
+            print_str("(boot stack)\n");
+        } else {
+            print_str("0x");
+            print_uint64_hex((uint64_t)curr->kernel_stack);
+            print_str("\n");
+        }
 
         curr = curr->next;
     } while (curr != task_list_head);

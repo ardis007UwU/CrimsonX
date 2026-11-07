@@ -89,6 +89,26 @@ void print_uint64_dec(uint64_t num) {
     }
 }
 
+void print_uint64_hex(uint64_t n) {
+    char buf[16];
+    int i = 0;
+    const char* hex_chars = "0123456789ABCDEF";
+
+    if (n == 0) {
+        print_char('0');
+        return;
+    }
+
+    while (n > 0) {
+        buf[i++] = hex_chars[n % 16];
+        n /= 16;
+    }
+
+    for (int j = i - 1; j >= 0; j--) {
+        print_char(buf[j]);
+    }
+}
+
 // --- Absolute Control Functions ---
 size_t print_get_col(void) { return col; }
 size_t print_get_row(void) { return row; }
