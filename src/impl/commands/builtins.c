@@ -7,6 +7,14 @@
 #include "mm/kmalloc.h"
 #include "mm/vmm.h"
 #include "kernel/process.h"
+#include "kernel/exec.h"
+#include "x86_64/syscall.h"
+#include "fs/vfs.h"
+#include "fs/crimsonfs.h"
+#include "blkdev.h"
+
+extern const uint8_t hello_elf_start[];
+extern const uint8_t hello_elf_end[];
 
 static int vmtest_failed;
 
@@ -52,10 +60,8 @@ static void cmd_vmtest(void) {
     vmtest_check("user page rejected without U bit", vmm_map_page_in(cr3, va + PAGE_SIZE, paddr & ~0xFFFULL, PAGE_WRITE) != 0);
     vmtest_check("user page rejected in kernel tables", vmm_map_page_in(kernel_cr3, va + PAGE_SIZE, paddr & ~0xFFFULL, PAGE_USER) != 0);
 
-    /* Real CR3 switch. Interrupts stay off: a context switch inside this window
-     * would reload the task's own CR3 and silently leave the test space. */
     if (mapped) {
-        volatile uint64_t* frame = (volatile uint64_t*)(paddr & ~0xFFFULL);   /* identity-mapped */
+        volatile uint64_t* frame = (volatile uint64_t*)(paddr & ~0xFFFULL);
         volatile uint64_t* user  = (volatile uint64_t*)va;
         uint64_t seen_in_user = 0, seen_in_kernel = 0;
         uint64_t saved_flags;
@@ -63,7 +69,7 @@ static void cmd_vmtest(void) {
         asm volatile("pushfq; pop %0; cli" : "=r"(saved_flags) : : "memory");
         *frame = pattern_a;
         vmm_switch(cr3);
-        seen_in_user = *user;      /* kernel code, data and stack still reachable */
+        seen_in_user = *user;
         *user = pattern_b;
         vmm_switch(kernel_cr3);
         seen_in_kernel = *frame;
@@ -89,6 +95,157 @@ static void sys_reboot(void) {
     asm volatile("cli; hlt");
 }
 
+/* ------------------------- filesystem commands ------------------------- */
+
+static void cmd_mkfs(void) {
+    blkdev_t* dev = blkdev_get(0);
+    if (!dev) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("mkfs: no block device (is a disk attached?)\n");
+        return;
+    }
+
+    if (vfs_get_root()) crimsonfs_unmount();
+
+    if (crimsonfs_format(dev) != 0) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("mkfs: format failed\n");
+        return;
+    }
+
+    if (crimsonfs_mount(dev)) {
+        print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+        print_str("mkfs: CrimsonFS volume created and mounted\n");
+    } else {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("mkfs: formatted but mount failed\n");
+    }
+}
+
+static void cmd_ls(void) {
+    if (!vfs_get_root()) {
+        print_set_color(PRINT_COLOR_BROWN, PRINT_COLOR_BLACK);
+        print_str("ls: no CrimsonFS volume mounted (try: mkfs)\n");
+        return;
+    }
+
+    /* A fresh "/" handle starts the directory stream at offset 0. */
+    vfs_node_t* dir = vfs_open("/");
+    if (!dir) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("ls: mount broken\n");
+        return;
+    }
+
+    print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+    print_str("name                 type\n");
+    print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
+
+    uint8_t block[512];
+    for (;;) {
+        int got = dir->read(dir, block, sizeof(block));
+        if (got <= 0) break;
+        for (size_t off = 0; off + sizeof(crimsonfs_dirent_t) <= (size_t)got;
+             off += sizeof(crimsonfs_dirent_t)) {
+            crimsonfs_dirent_t* e = (crimsonfs_dirent_t*)(block + off);
+            if (e->inode == 0) continue;
+
+            print_str(e->name);
+            for (size_t pad = strlen(e->name); pad < 20; pad++) print_char(' ');
+            if (e->type == CRIMFS_TYPE_DIR) {
+                print_str("<dir>\n");
+            } else {
+                print_str("file\n");
+            }
+        }
+        if (got < (int)sizeof(block)) break;   /* end of directory */
+    }
+
+    vfs_close(dir);
+}
+
+static void cmd_cat(const char* name) {
+    vfs_node_t* n = vfs_open(name);
+    if (!n) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("cat: no such file: ");
+        print_str((char*)name);
+        print_str("\n");
+        return;
+    }
+    if (n->type != VFS_TYPE_FILE) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("cat: not a regular file\n");
+        vfs_close(n);
+        return;
+    }
+
+    uint8_t buf[64];
+    size_t total = 0;
+    while (total < n->size) {
+        int got = n->read(n, buf, sizeof(buf));
+        if (got <= 0) break;
+        for (int i = 0; i < got; i++) print_char(buf[i]);
+        total += (size_t)got;
+    }
+    print_char('\n');
+    vfs_close(n);
+}
+
+static void cmd_install(void) {
+    vfs_node_t* root = vfs_get_root();
+    if (!root) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("install: no filesystem (try: mkfs)\n");
+        return;
+    }
+
+    const size_t elf_len = (size_t)(hello_elf_end - hello_elf_start);
+    if (elf_len == 0) {
+        print_str("install: no embedded program\n");
+        return;
+    }
+
+    /* recreate to make the demo idempotent: remove by remounting? crimsonfs
+     * has no delete; reuse the file if present */
+    if (crimsonfs_create(root, "hello") != 0) {
+        /* already exists: reuse and overwrite in place */
+    }
+
+    vfs_node_t* f = vfs_open("/hello");
+    if (!f) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("install: cannot reopen /hello\n");
+        return;
+    }
+
+    int n = f->write(f, hello_elf_start, elf_len);
+    vfs_close(f);
+
+    if (n < 0 || (size_t)n != elf_len) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("install: write failed\n");
+        return;
+    }
+    print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+    print_str("install: wrote hello.elf (");
+    print_uint64_dec(elf_len);
+    print_str(" bytes) to /\n");
+}
+
+static void cmd_exec(const char* name) {
+    task_t* t = process_spawn_user(name);
+    if (!t) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("\nexec: spawn failed\n");
+        return;
+    }
+    print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+    print_str("\nexec: pid ");
+    print_uint64_dec(t->id);
+    print_str(" queued\n");
+}
+
 void execute_command(char* cmd) {
     if (cmd[0] == '\0') return;
 
@@ -105,6 +262,13 @@ void execute_command(char* cmd) {
         print_str("  sleep   - Pause shell execution (ms)\n");
         print_str("  crash   - Trigger a CPU exception: crash <pf|gp|ud|de>\n");
         print_str("  vmtest  - Check per-process address spaces\n");
+        print_str("  ps      - List processes\n");
+        print_str("\nstorage:\n");
+        print_str("  ls      - List files on the mounted CrimsonFS\n");
+        print_str("  cat     - cat <file>: dump a file's bytes\n");
+        print_str("  mkfs    - Format disk 0 as CrimsonFS and mount it\n");
+        print_str("  install - Write the embedded hello.elf program to disk\n");
+        print_str("  exec    - exec <path>: load ELF from CrimsonFS, spawn ring-3 task\n");
 
     } else if (strcmp(cmd, "uptime") == 0 || strcmp(cmd, "UPTIME") == 0) {
         uint64_t uptime_sec = pit_get_uptime_sec();
@@ -135,7 +299,7 @@ void execute_command(char* cmd) {
             print_uint64_dec(ms);
             print_str(" ms...\n");
 
-            pit_sleep(ms);
+            process_sleep(ms);
 
             print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
             print_str("Done.\n");
@@ -143,20 +307,20 @@ void execute_command(char* cmd) {
             print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
             print_str("Usage: sleep <milliseconds>\n");
         }
-        
+
     } else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "CLEAR") == 0) {
         print_clear();
-        
+
     } else if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "REBOOT") == 0) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("Rebooting CrimsonX...\n");
         sys_reboot();
-        
+
     } else if (strcmp(cmd, "meminfo") == 0 || strcmp(cmd, "MEMINFO") == 0) {
         uint64_t free_blocks = pmm_get_free_block_count();
         uint64_t used_blocks = pmm_get_used_block_count();
         uint64_t total_blocks = free_blocks + used_blocks;
-        
+
         uint64_t total_mb = (total_blocks * 4096) / (1024 * 1024);
         uint64_t used_mb = (used_blocks * 4096) / (1024 * 1024);
         uint64_t free_mb = (free_blocks * 4096) / (1024 * 1024);
@@ -164,12 +328,12 @@ void execute_command(char* cmd) {
         print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
         print_str("Physical Memory (PMM) Status:\n");
         print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
-        
+
         print_str("  Block Size:   4 KB\n");
         print_str("  Total Blocks: "); print_uint64_dec(total_blocks); print_str("\n");
         print_str("  Used Blocks:  "); print_uint64_dec(used_blocks); print_str("\n");
         print_str("  Free Blocks:  "); print_uint64_dec(free_blocks); print_str("\n\n");
-        
+
         print_str("  Total RAM:    "); print_uint64_dec(total_mb); print_str(" MB\n");
         print_str("  Used RAM:     "); print_uint64_dec(used_mb); print_str(" MB\n");
         print_str("  Free RAM:     "); print_uint64_dec(free_mb); print_str(" MB\n");
@@ -180,7 +344,7 @@ void execute_command(char* cmd) {
 
         char* str = (char*) kmalloc(64);
         if (str != NULL) {
-            str[0] = 'H'; str[1] = 'e'; str[2] = 'a'; str[3] = 'p'; 
+            str[0] = 'H'; str[1] = 'e'; str[2] = 'a'; str[3] = 'p';
             str[4] = ' '; str[5] = 'O'; str[6] = 'K'; str[7] = '\0';
 
             print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
@@ -193,25 +357,22 @@ void execute_command(char* cmd) {
             kfree(str);
             print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
             print_str("  Memory freed successfully.\n");
-            
 
         } else {
             print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
             print_str("  Allocation failed!\n");
         }
-    
+
     } else if (strcmp(cmd, "ps") == 0 || strcmp(cmd, "PS") == 0) {
         process_print_list();
-    
+
     } else if (strcmp(cmd, "vmtest") == 0) {
         cmd_vmtest();
 
     } else if (strcmp(cmd, "crash pf") == 0) {
-        /* Unmapped address (1 TiB, outside the 128 MB identity map) -> #PF, CR2 = this address */
         *(volatile uint64_t*)0x10000000000ULL = 1;
 
     } else if (strcmp(cmd, "crash gp") == 0) {
-        /* Non-canonical address -> #GP(0) */
         *(volatile uint64_t*)0x8000000000000000ULL = 1;
 
     } else if (strcmp(cmd, "crash ud") == 0) {
@@ -224,8 +385,34 @@ void execute_command(char* cmd) {
         print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
         print_str(cmd + 5);
         print_str("\n");
-        
-        
+
+    } else if (strcmp(cmd, "mkfs") == 0) {
+        cmd_mkfs();
+
+    } else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "LS") == 0) {
+        cmd_ls();
+
+    } else if (cmd[0] == 'c' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == ' ') {
+        cmd_cat(cmd + 4);
+
+    } else if (strcmp(cmd, "install") == 0) {
+        cmd_install();
+
+    } else if (cmd[0] == 'e' && cmd[1] == 'x' && cmd[2] == 'e' && cmd[3] == 'c' && cmd[4] == ' ') {
+        /* trim filepath spaces */
+        char* path = cmd + 5;
+        size_t len = strlen(path);
+        while (len > 0 && (path[len - 1] == ' ')) {
+            len--;
+            path[len] = '\0';
+        }
+        if (len == 0) {
+            print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+            print_str("Usage: exec <path>\n");
+        } else {
+            cmd_exec(path);
+        }
+
     } else {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("cxsh: command not found: ");
