@@ -10,6 +10,19 @@ static task_t* task_list_head = NULL;
 static uint64_t next_pid = 1;
 
 extern void switch_to(task_t* next, task_t* current);
+extern uint64_t get_rsp(void);
+
+void process_exit(void) {
+    if (!current_task) return;
+
+    current_task->state = TASK_STATE_DEAD;
+    schedule();
+
+    /* Safety loop in case scheduler returns to a dead task */
+    while (1) {
+        asm volatile("hlt");
+    }
+}
 
 void process_init(void) {
     task_t* main_task = (task_t*) kmalloc(sizeof(task_t));
@@ -18,6 +31,10 @@ void process_init(void) {
     main_task->cr3 = 0;
     main_task->wake_ticks = 0;
     main_task->kernel_stack = NULL;
+
+    /* Safely fetch exact stack pointer from pure assembly function */
+    main_task->rsp = get_rsp();
+
     main_task->next = main_task;
 
     current_task = main_task;
@@ -40,8 +57,11 @@ task_t* process_create(void (*entry_point)(void)) {
 
     uint64_t* stack = (uint64_t*)((uint64_t)new_task->kernel_stack + STACK_SIZE);
 
+    /* Push exit wrapper: if entry_point returns, jump directly to process_exit */
+    *(--stack) = (uint64_t)process_exit;
     *(--stack) = (uint64_t)entry_point;
 
+    /* Reserve space for 15 general-purpose registers (RAX-R15) */
     for (int i = 0; i < 15; i++) {
         *(--stack) = 0;
     }
@@ -72,7 +92,7 @@ void schedule(void) {
     uint64_t current_ticks = pit_get_ticks();
     task_t* curr = task_list_head;
 
-    /* Wake up any sleeping tasks whose wait target has passed */
+    /* Wake up any sleeping tasks whose wait timer has expired */
     do {
         if (curr->state == TASK_STATE_BLOCKED && current_ticks >= curr->wake_ticks) {
             curr->state = TASK_STATE_READY;
@@ -99,4 +119,29 @@ void schedule(void) {
     current_task = next;
 
     switch_to(next, prev);
+}
+
+void process_print_list(void) {
+    if (!task_list_head) return;
+
+    print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+    print_str("PID   STATE       STACK RSP\n");
+    print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
+
+    task_t* curr = task_list_head;
+    do {
+        print_uint64_dec(curr->id);
+        print_str("     ");
+
+        if (curr->state == TASK_STATE_RUNNING) print_str("RUNNING     ");
+        else if (curr->state == TASK_STATE_READY) print_str("READY       ");
+        else if (curr->state == TASK_STATE_BLOCKED) print_str("BLOCKED     ");
+        else print_str("DEAD        ");
+
+        print_str("0x");
+        print_uint64_dec((uint64_t)curr->kernel_stack);
+        print_str("\n");
+
+        curr = curr->next;
+    } while (curr != task_list_head);
 }

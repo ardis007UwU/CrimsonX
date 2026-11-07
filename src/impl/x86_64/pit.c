@@ -1,6 +1,7 @@
 #include "x86_64/pit.h"
 #include "x86_64/port.h"
 #include "x86_64/pic.h"
+#include "kernel/process.h"
 
 #define PIT_BASE_FREQ     1193182
 #define PIT_COMMAND_PORT  0x43
@@ -22,6 +23,7 @@ void pit_init(uint32_t frequency) {
 void pit_handler(void) {
     pit_ticks++;
     pic_eoi_master();
+    schedule();
 }
 
 uint64_t pit_get_ticks(void) {
@@ -33,14 +35,11 @@ uint64_t pit_get_uptime_sec(void) {
 }
 
 static uint8_t rtc_read_second(void) {
-    /* Select register 0x00 (Seconds) */
     port_outb(0x70, 0x00);
-    /* Read the value */
     return port_inb(0x71);
 }
 
 void pit_sleep(uint32_t ms) {
-    /* Calculate target seconds to wait (minimum 1 second for noticeable delay) */
     uint32_t seconds_to_wait = ms / 1000;
     if (seconds_to_wait == 0 && ms > 0) {
         seconds_to_wait = 1;
@@ -49,7 +48,6 @@ void pit_sleep(uint32_t ms) {
     uint8_t current_sec = rtc_read_second();
     uint8_t target_sec = current_sec;
     
-    /* Calculate target second (RTC wraps at 60) */
     for (uint32_t i = 0; i < seconds_to_wait; i++) {
         target_sec++;
         if (target_sec >= 60) {
@@ -57,7 +55,6 @@ void pit_sleep(uint32_t ms) {
         }
     }
 
-    /* Block until the RTC hardware actually ticks over to the target second */
     while (rtc_read_second() != target_sec) {
         asm volatile("pause");
     }

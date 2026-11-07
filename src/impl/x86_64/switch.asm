@@ -1,7 +1,12 @@
 global switch_to
+global get_rsp
 
 section .text
 bits 64
+
+get_rsp:
+    mov rax, rsp
+    ret
 
 switch_to:
     ; RDI = next task pointer, RSI = current task pointer

@@ -59,6 +59,6 @@ void kernel_main(void) {
 
     while (1) {
         shell_update();
-        schedule();
+        asm volatile("hlt");
     }
 }

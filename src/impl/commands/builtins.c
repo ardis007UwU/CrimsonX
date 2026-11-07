@@ -5,6 +5,7 @@
 #include "x86_64/pit.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
+#include "kernel/process.h"
 
 static void sys_reboot(void) {
     uint8_t status = 0x02;
@@ -117,15 +118,21 @@ void execute_command(char* cmd) {
             kfree(str);
             print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
             print_str("  Memory freed successfully.\n");
+            
+
         } else {
             print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
             print_str("  Allocation failed!\n");
         }
-        
+    
+    } else if (strcmp(cmd, "ps") == 0 || strcmp(cmd, "PS") == 0) {
+        process_print_list();
+    
     } else if (cmd[0] == 'e' && cmd[1] == 'c' && cmd[2] == 'h' && cmd[3] == 'o' && cmd[4] == ' ') {
         print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
         print_str(cmd + 5);
         print_str("\n");
+        
         
     } else {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);

@@ -21,8 +21,11 @@ typedef struct task {
     struct task* next;
 } task_t;
 
-void process_sleep(uint32_t ms);
+void process_init(void);
 task_t* process_create(void (*entry_point)(void));
+void process_sleep(uint32_t ms);
+void process_exit(void);
+void process_print_list(void);
 void schedule(void);
 
 #endif
