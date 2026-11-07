@@ -30,7 +30,8 @@ void execute_command(char* cmd) {
         print_str("  alloc   - Test heap memory allocation\n");
         print_str("  uptime  - Display system uptime\n");
         print_str("  sleep   - Pause shell execution (ms)\n");
-        
+        print_str("  crash   - Trigger a CPU exception: crash <pf|gp|ud|de>\n");
+
     } else if (strcmp(cmd, "uptime") == 0 || strcmp(cmd, "UPTIME") == 0) {
         uint64_t uptime_sec = pit_get_uptime_sec();
         uint64_t ticks = pit_get_ticks();
@@ -128,6 +129,20 @@ void execute_command(char* cmd) {
     } else if (strcmp(cmd, "ps") == 0 || strcmp(cmd, "PS") == 0) {
         process_print_list();
     
+    } else if (strcmp(cmd, "crash pf") == 0) {
+        /* Unmapped address (1 TiB, outside the 128 MB identity map) -> #PF, CR2 = this address */
+        *(volatile uint64_t*)0x10000000000ULL = 1;
+
+    } else if (strcmp(cmd, "crash gp") == 0) {
+        /* Non-canonical address -> #GP(0) */
+        *(volatile uint64_t*)0x8000000000000000ULL = 1;
+
+    } else if (strcmp(cmd, "crash ud") == 0) {
+        asm volatile("ud2");
+
+    } else if (strcmp(cmd, "crash de") == 0) {
+        asm volatile("xor %%edx, %%edx\n\tmov $1, %%eax\n\txor %%ecx, %%ecx\n\tdiv %%ecx" : : : "eax", "ecx", "edx");
+
     } else if (cmd[0] == 'e' && cmd[1] == 'c' && cmd[2] == 'h' && cmd[3] == 'o' && cmd[4] == ' ') {
         print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
         print_str(cmd + 5);

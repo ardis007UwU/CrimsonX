@@ -6,7 +6,7 @@ ASM_OBJECTS := $(patsubst src/impl/%.asm, build/%.o, $(ASM_SOURCES))
 
 $(C_OBJECTS): build/%.o : src/impl/%.c
 	@mkdir -p $(dir $@)
-	x86_64-elf-gcc -c -I src/intf -ffreestanding $< -o $@
+	x86_64-elf-gcc -c -I src/intf -ffreestanding -mno-red-zone $< -o $@
 
 $(ASM_OBJECTS): build/%.o : src/impl/%.asm
 	@mkdir -p $(dir $@)

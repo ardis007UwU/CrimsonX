@@ -2,6 +2,7 @@
 #include "keyboard.h"
 #include "shell.h"
 #include "x86_64/port.h"
+#include "x86_64/gdt.h"
 #include "x86_64/idt.h"
 #include "x86_64/pic.h"
 #include "x86_64/pit.h"
@@ -30,6 +31,10 @@ void task_worker(void) {
 }
 
 void kernel_main(void) {
+    /* Replace the minimal boot GDT with the full one (kernel/user segments + TSS)
+     * before the IDT is built. Interrupts are still off here. */
+    gdt_init();
+
     print_clear();
     print_set_color(PRINT_COLOR_YELLOW, PRINT_COLOR_BLACK);
     print_str("Welcome to CrimsonX OS!\n\n");

@@ -3,6 +3,7 @@
 #include "x86_64/gdt.h"
 #include "x86_64/idt.h"
 #include "x86_64/pic.h"
+#include "x86_64/exceptions.h"
 
 #define IDT_IRQ0_TIMER 0x20
 #define IDT_IRQ1_KEYBOARD 0x21
@@ -73,7 +74,15 @@ void idt_init(void) {
     
     idt_ptr.limit = (sizeof(struct IdtEntry) * 256) - 1;
     idt_ptr.base = (uint64_t) &idt;
-    
+
+    /* CPU exceptions (vectors 0-31): print a register dump instead of
+     * silently triple-faulting. */
+    for (int i = 0; i < 32; i++) {
+        idt_set_entry(i, isr_stub_table[i], GDT_SELECTOR_CS_KERNEL, IDT_ENTRY_TYPE_INTERRUPT);
+    }
+    /* #DF runs on its own stack (IST1, set up in the TSS by gdt_init). */
+    idt[8].ist = GDT_IST_DOUBLE_FAULT;
+
     idt_set_entry(IDT_IRQ0_TIMER, (uint64_t) idt_handler_timer_wrapped, GDT_SELECTOR_CS_KERNEL, IDT_ENTRY_TYPE_INTERRUPT);
     idt_set_entry(IDT_IRQ1_KEYBOARD, (uint64_t) idt_handler_keyboard_wrapped, GDT_SELECTOR_CS_KERNEL, IDT_ENTRY_TYPE_INTERRUPT);
     
