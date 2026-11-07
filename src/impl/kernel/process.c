@@ -2,8 +2,29 @@
 #include "mm/kmalloc.h"
 #include "print.h"
 #include "x86_64/pit.h"
+#include "x86_64/gdt.h"
+#include "mm/vmm.h"
 
-#define STACK_SIZE 4096
+/* 16 KB: interrupts, syscalls and the register dump from exception_handler
+ * all run on this stack, 4 KB was too tight. */
+#define STACK_SIZE 16384
+
+/* switch.asm reads/writes task->rsp at [reg + 8] */
+_Static_assert(__builtin_offsetof(task_t, rsp) == 8, "task_t.rsp must stay at offset 8 (switch.asm)");
+
+#define RFLAGS_IF (1ull << 9)
+
+/* Interrupt-flag save/restore. schedule() is called both from the timer IRQ
+ * (IF already 0) and from task context (process_sleep, IF = 1). */
+static inline uint64_t irq_save(void) {
+    uint64_t flags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static inline void irq_restore(uint64_t flags) {
+    if (flags & RFLAGS_IF) asm volatile("sti" : : : "memory");
+}
 
 static task_t* current_task = NULL;
 static task_t* task_list_head = NULL;
@@ -28,9 +49,10 @@ void process_init(void) {
     task_t* main_task = (task_t*) kmalloc(sizeof(task_t));
     main_task->id = 0;
     main_task->state = TASK_STATE_RUNNING;
-    main_task->cr3 = 0;
+    main_task->cr3 = vmm_kernel_cr3();
     main_task->wake_ticks = 0;
     main_task->kernel_stack = NULL;
+    main_task->kernel_stack_top = 0;
 
     /* Safely fetch exact stack pointer from pure assembly function */
     main_task->rsp = get_rsp();
@@ -48,14 +70,21 @@ task_t* process_create(void (*entry_point)(void)) {
     new_task->id = next_pid++;
     new_task->state = TASK_STATE_READY;
     new_task->wake_ticks = 0;
+    new_task->cr3 = vmm_kernel_cr3();
     new_task->kernel_stack = kmalloc(STACK_SIZE);
-    
+
     if (!new_task->kernel_stack) {
         kfree(new_task);
         return NULL;
     }
 
-    uint64_t* stack = (uint64_t*)((uint64_t)new_task->kernel_stack + STACK_SIZE);
+    /* kmalloc hands out block + 24 bytes, so base + STACK_SIZE is only 8-byte
+     * aligned. Round the top down to 16: the task must start with
+     * RSP % 16 == 8, as if it had been called. */
+    uint64_t stack_top = ((uint64_t)new_task->kernel_stack + STACK_SIZE) & ~0xFULL;
+    new_task->kernel_stack_top = stack_top;
+
+    uint64_t* stack = (uint64_t*)stack_top;
 
     /* Push exit wrapper: if entry_point returns, jump directly to process_exit */
     *(--stack) = (uint64_t)process_exit;
@@ -86,7 +115,7 @@ void process_sleep(uint32_t ms) {
     schedule();
 }
 
-void schedule(void) {
+static void schedule_locked(void) {
     if (!current_task || !current_task->next) return;
 
     uint64_t current_ticks = pit_get_ticks();
@@ -118,7 +147,22 @@ void schedule(void) {
     next->state = TASK_STATE_RUNNING;
     current_task = next;
 
+    /* Per-task hardware state. Both are safe to change while still on prev's
+     * stack: every kernel stack lives in the kernel half, which is mapped in
+     * every address space. */
+    if (next->kernel_stack_top) gdt_set_kernel_stack(next->kernel_stack_top);
+    vmm_switch(next->cr3);
+
     switch_to(next, prev);
+}
+
+/* Interrupts stay off for the whole switch so a timer tick cannot re-enter the
+ * scheduler between updating rsp0/cr3 and the actual stack switch. The saved IF
+ * is restored when this task resumes, or immediately if nothing was switched. */
+void schedule(void) {
+    uint64_t flags = irq_save();
+    schedule_locked();
+    irq_restore(flags);
 }
 
 void process_print_list(void) {

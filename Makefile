@@ -12,6 +12,18 @@ $(ASM_OBJECTS): build/%.o : src/impl/%.asm
 	@mkdir -p $(dir $@)
 	nasm -f elf64 $< -o $@
 
+# Host-side unit tests for the memory managers (needs only a normal gcc).
+# Runs vmm.c / pmm.c as ordinary programs under AddressSanitizer + UBSan.
+.PHONY: test-host
+test-host:
+	@mkdir -p build/host
+	gcc -g -Wall -Wextra -fsanitize=address,undefined -I src/intf -DVMM_HOST_TEST \
+		tests/host/vmm_test.c src/impl/mm/vmm.c -o build/host/vmm_test
+	gcc -g -Wall -Wextra -fsanitize=address,undefined -I src/intf \
+		tests/host/pmm_test.c src/impl/kernel/pmm.c -o build/host/pmm_test
+	./build/host/vmm_test
+	./build/host/pmm_test
+
 .PHONY: build-x86_64
 build-x86_64: $(C_OBJECTS) $(ASM_OBJECTS)
 	@mkdir -p dist/x86_64

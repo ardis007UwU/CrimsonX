@@ -30,13 +30,12 @@ void* kmalloc(size_t size) {
     }
 
     size_t blocks_needed = (total_size + PMM_BLOCK_SIZE - 1) / PMM_BLOCK_SIZE;
-    void* block_mem = pmm_alloc_block();
-    
-    if (block_mem == NULL) return NULL;
+    // The header, the payload and every extra block must be physically
+    // consecutive; separate pmm_alloc_block() calls only guarantee that until
+    // the first frame gets freed and leaves a hole.
+    void* block_mem = pmm_alloc_contiguous(blocks_needed);
 
-    for (size_t i = 1; i < blocks_needed; i++) {
-        pmm_alloc_block();
-    }
+    if (block_mem == NULL) return NULL;
 
     struct Header* new_header = (struct Header*)block_mem;
     new_header->size = (blocks_needed * PMM_BLOCK_SIZE) - sizeof(struct Header);

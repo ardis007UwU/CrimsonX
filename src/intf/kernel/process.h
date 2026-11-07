@@ -19,6 +19,11 @@ typedef struct task {
     uint64_t wake_ticks;
     void* kernel_stack;
     struct task* next;
+    /* Top of this task's kernel stack (16-byte aligned), loaded into TSS.rsp0 on
+     * every switch to the task so ring 3 -> ring 0 transitions land on it.
+     * 0 for the boot task, which never runs in ring 3.
+     * NOTE: switch.asm hard-codes offset 8 for `rsp`, so keep id/rsp first. */
+    uint64_t kernel_stack_top;
 } task_t;
 
 void process_init(void);

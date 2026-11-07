@@ -5,7 +5,80 @@
 #include "x86_64/pit.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
+#include "mm/vmm.h"
 #include "kernel/process.h"
+
+static int vmtest_failed;
+
+static void vmtest_check(char* name, int ok) {
+    print_set_color(ok ? PRINT_COLOR_GREEN : PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+    print_str(ok ? "  PASS  " : "  FAIL  ");
+    print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
+    print_str(name);
+    print_str("\n");
+    if (!ok) vmtest_failed = 1;
+}
+
+/* Exercises per-process address spaces on the real CPU. */
+static void cmd_vmtest(void) {
+    const uint64_t va = USER_SPACE_START + 0x1000;
+    const uint64_t pattern_a = 0x1122334455667788ULL;
+    const uint64_t pattern_b = 0xA5A5A5A5DEADBEEFULL;
+    uint64_t paddr = 0, flags = 0;
+
+    vmtest_failed = 0;
+    print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+    print_str("vmtest: address-space checks\n");
+
+    uint64_t free_before = pmm_get_free_block_count();
+    uint64_t kernel_cr3 = vmm_kernel_cr3();
+
+    uint64_t cr3 = vmm_create_address_space();
+    vmtest_check("create address space", cr3 != 0 && cr3 != kernel_cr3);
+    if (!cr3) return;
+
+    vmtest_check("map user page (U|W)", vmm_map_user_alloc(cr3, va, PAGE_SIZE, PAGE_USER | PAGE_WRITE) == 0);
+
+    int mapped = vmm_query(cr3, va, &paddr, &flags) == 0;
+    vmtest_check("user page effective flags = P|W|U", mapped && flags == (PAGE_PRESENT | PAGE_WRITE | PAGE_USER));
+
+    vmtest_check("user page invisible in kernel tables", vmm_query(kernel_cr3, va, 0, 0) != 0);
+
+    int kmapped = vmm_query(cr3, 0x100000, 0, &flags) == 0;
+    vmtest_check("kernel memory mapped in new space, supervisor-only",
+                 kmapped && (flags & PAGE_USER) == 0);
+
+    vmtest_check("kernel page rejected with U bit", vmm_map_page_in(cr3, 0x300000, 0x300000, PAGE_USER | PAGE_WRITE) != 0);
+    vmtest_check("user page rejected without U bit", vmm_map_page_in(cr3, va + PAGE_SIZE, paddr & ~0xFFFULL, PAGE_WRITE) != 0);
+    vmtest_check("user page rejected in kernel tables", vmm_map_page_in(kernel_cr3, va + PAGE_SIZE, paddr & ~0xFFFULL, PAGE_USER) != 0);
+
+    /* Real CR3 switch. Interrupts stay off: a context switch inside this window
+     * would reload the task's own CR3 and silently leave the test space. */
+    if (mapped) {
+        volatile uint64_t* frame = (volatile uint64_t*)(paddr & ~0xFFFULL);   /* identity-mapped */
+        volatile uint64_t* user  = (volatile uint64_t*)va;
+        uint64_t seen_in_user = 0, seen_in_kernel = 0;
+        uint64_t saved_flags;
+
+        asm volatile("pushfq; pop %0; cli" : "=r"(saved_flags) : : "memory");
+        *frame = pattern_a;
+        vmm_switch(cr3);
+        seen_in_user = *user;      /* kernel code, data and stack still reachable */
+        *user = pattern_b;
+        vmm_switch(kernel_cr3);
+        seen_in_kernel = *frame;
+        if (saved_flags & (1ULL << 9)) asm volatile("sti" : : : "memory");
+
+        vmtest_check("read through user vaddr after CR3 switch", seen_in_user == pattern_a);
+        vmtest_check("write via user vaddr lands in the frame", seen_in_kernel == pattern_b);
+    }
+
+    vmm_destroy_address_space(cr3);
+    vmtest_check("destroy leaks no frames", pmm_get_free_block_count() == free_before);
+
+    print_set_color(vmtest_failed ? PRINT_COLOR_RED : PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+    print_str(vmtest_failed ? "vmtest: FAILED\n" : "vmtest: all checks passed\n");
+}
 
 static void sys_reboot(void) {
     uint8_t status = 0x02;
@@ -31,6 +104,7 @@ void execute_command(char* cmd) {
         print_str("  uptime  - Display system uptime\n");
         print_str("  sleep   - Pause shell execution (ms)\n");
         print_str("  crash   - Trigger a CPU exception: crash <pf|gp|ud|de>\n");
+        print_str("  vmtest  - Check per-process address spaces\n");
 
     } else if (strcmp(cmd, "uptime") == 0 || strcmp(cmd, "UPTIME") == 0) {
         uint64_t uptime_sec = pit_get_uptime_sec();
@@ -129,6 +203,9 @@ void execute_command(char* cmd) {
     } else if (strcmp(cmd, "ps") == 0 || strcmp(cmd, "PS") == 0) {
         process_print_list();
     
+    } else if (strcmp(cmd, "vmtest") == 0) {
+        cmd_vmtest();
+
     } else if (strcmp(cmd, "crash pf") == 0) {
         /* Unmapped address (1 TiB, outside the 128 MB identity map) -> #PF, CR2 = this address */
         *(volatile uint64_t*)0x10000000000ULL = 1;

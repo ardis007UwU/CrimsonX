@@ -52,6 +52,31 @@ void* pmm_alloc_block(void) {
     return NULL;
 }
 
+void* pmm_alloc_contiguous(size_t count) {
+    if (count == 0) return NULL;
+    if (count == 1) return pmm_alloc_block();
+    if (pmm_total_blocks - pmm_used_blocks < count) return NULL;
+
+    uint64_t run = 0;
+    for (uint64_t i = 0; i < pmm_total_blocks; i++) {
+        if (pmm_bitmap_test(i)) {
+            run = 0;
+            continue;
+        }
+
+        run++;
+        if (run == count) {
+            uint64_t first = i - count + 1;
+            for (uint64_t b = first; b <= i; b++) {
+                pmm_bitmap_set(b);
+            }
+            pmm_used_blocks += count;
+            return (void*)(first * PMM_BLOCK_SIZE);
+        }
+    }
+    return NULL;
+}
+
 void pmm_free_block(void* ptr) {
     uint64_t frame = ((uint64_t)ptr) / PMM_BLOCK_SIZE;
     if (pmm_bitmap_test(frame)) {
