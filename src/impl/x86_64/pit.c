@@ -13,6 +13,7 @@ void pit_init(uint32_t frequency) {
     pit_frequency = frequency;
     uint16_t divisor = (uint16_t)(PIT_BASE_FREQ / frequency);
 
+    /* Channel 0, Access mode low/high byte, Mode 3 (Square wave generator) */
     port_outb(PIT_COMMAND_PORT, 0x36);
     port_outb(PIT_CHANNEL0_PORT, (uint8_t)(divisor & 0xFF));
     port_outb(PIT_CHANNEL0_PORT, (uint8_t)((divisor >> 8) & 0xFF));
@@ -31,18 +32,33 @@ uint64_t pit_get_uptime_sec(void) {
     return pit_ticks / pit_frequency;
 }
 
+static uint8_t rtc_read_second(void) {
+    /* Select register 0x00 (Seconds) */
+    port_outb(0x70, 0x00);
+    /* Read the value */
+    return port_inb(0x71);
+}
+
 void pit_sleep(uint32_t ms) {
-    uint64_t ticks_to_wait = ((uint64_t)ms * (uint64_t)pit_frequency) / 1000;
-    if (ticks_to_wait == 0 && ms > 0) {
-        ticks_to_wait = 1;
+    /* Calculate target seconds to wait (minimum 1 second for noticeable delay) */
+    uint32_t seconds_to_wait = ms / 1000;
+    if (seconds_to_wait == 0 && ms > 0) {
+        seconds_to_wait = 1;
     }
 
-    uint64_t target_ticks = pit_ticks + ticks_to_wait;
+    uint8_t current_sec = rtc_read_second();
+    uint8_t target_sec = current_sec;
     
-    while (pit_ticks < target_ticks) {
-        // sti: Guarantees hardware interrupts are enabled so the timer can fire.
-        // hlt: Sleeps the CPU until the next interrupt to save power.
-        // "memory": Tells the GCC compiler it MUST reload variables from RAM.
-        asm volatile("sti; hlt" : : : "memory");
+    /* Calculate target second (RTC wraps at 60) */
+    for (uint32_t i = 0; i < seconds_to_wait; i++) {
+        target_sec++;
+        if (target_sec >= 60) {
+            target_sec = 0;
+        }
+    }
+
+    /* Block until the RTC hardware actually ticks over to the target second */
+    while (rtc_read_second() != target_sec) {
+        asm volatile("pause");
     }
 }
