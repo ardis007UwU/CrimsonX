@@ -8,6 +8,26 @@
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "mm/kmalloc.h"
+#include "kernel/process.h"
+
+void task_worker(void) {
+    uint64_t ticks = 0;
+    while (1) {
+        const char* label = "[T1 Active: ";
+        uint8_t color = PRINT_COLOR_GREEN | (PRINT_COLOR_BLACK << 4);
+
+        for (size_t i = 0; label[i] != '\0'; i++) {
+            print_put_char_at(label[i], color, 60 + i, 0);
+        }
+
+        char count_digit = '0' + (ticks % 10);
+        print_put_char_at(count_digit, color, 72, 0);
+        print_put_char_at(']', color, 73, 0);
+
+        ticks++;
+        process_sleep(1000);
+    }
+}
 
 void kernel_main(void) {
     print_clear();
@@ -17,7 +37,6 @@ void kernel_main(void) {
     idt_init();
     pic_init();
 
-    // Unmask IRQ0 (Timer)
     uint8_t pic_mask = port_inb(0x21);
     port_outb(0x21, pic_mask & ~0x01);
 
@@ -33,10 +52,13 @@ void kernel_main(void) {
     vmm_init();
     kmalloc_init();
 
+    process_init();
+    process_create(task_worker);
+
     shell_init();
 
     while (1) {
         shell_update();
-        asm volatile("hlt");
+        schedule();
     }
 }
