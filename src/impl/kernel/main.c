@@ -4,6 +4,7 @@
 #include "x86_64/idt.h"
 #include "x86_64/pic.h"
 #include "mm/pmm.h"
+#include "mm/vmm.h"
 #include "mm/kmalloc.h"
 
 void kernel_main(void) {
@@ -19,8 +20,15 @@ void kernel_main(void) {
 
     asm volatile("sti");
 
+    // Initialize Memory Subsystems in order:
+    // 1. Physical Memory Manager
     pmm_init(128ULL * 1024 * 1024);
-    kmalloc_init(); // <--- Start the heap
+    
+    // 2. Virtual Memory Manager (Paging)
+    vmm_init();
+    
+    // 3. Kernel Heap
+    kmalloc_init();
 
     shell_init();
 
