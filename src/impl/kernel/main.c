@@ -1,8 +1,10 @@
 #include "print.h"
 #include "keyboard.h"
 #include "shell.h"
+#include "x86_64/port.h"
 #include "x86_64/idt.h"
 #include "x86_64/pic.h"
+#include "x86_64/pit.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "mm/kmalloc.h"
@@ -15,22 +17,26 @@ void kernel_main(void) {
     idt_init();
     pic_init();
 
+    // Unmask IRQ0 (Timer)
+    uint8_t pic_mask = port_inb(0x21);
+    port_outb(0x21, pic_mask & ~0x01);
+
+    pit_init(100);
+    idt_set_handler_timer(pit_handler);
+
     keyboard_init();
     keyboard_set_handler(shell_handle_input);
 
     asm volatile("sti");
 
-    // Initialize Memory Subsystems in order:
-    // 1. Physical Memory Manager
     pmm_init(128ULL * 1024 * 1024);
-    
-    // 2. Virtual Memory Manager (Paging)
     vmm_init();
-    
-    // 3. Kernel Heap
     kmalloc_init();
 
     shell_init();
 
-    while (1);
+    while (1) {
+        shell_update();
+        asm volatile("hlt");
+    }
 }

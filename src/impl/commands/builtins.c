@@ -2,6 +2,7 @@
 #include "print.h"
 #include "string.h"
 #include "x86_64/port.h"
+#include "x86_64/pit.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
 
@@ -26,12 +27,55 @@ void execute_command(char* cmd) {
         print_str("  echo    - Print text back to screen\n");
         print_str("  meminfo - Display physical memory statistics\n");
         print_str("  alloc   - Test heap memory allocation\n");
+        print_str("  uptime  - Display system uptime\n");
+        print_str("  sleep   - Pause shell execution (ms)\n");
+        
+    } else if (strcmp(cmd, "uptime") == 0 || strcmp(cmd, "UPTIME") == 0) {
+        uint64_t uptime_sec = pit_get_uptime_sec();
+        uint64_t ticks = pit_get_ticks();
+
+        print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+        print_str("System Uptime: ");
+        print_uint64_dec(uptime_sec);
+        print_str(" seconds (");
+        print_uint64_dec(ticks);
+        print_str(" ticks)\n");
+
+    } else if (strcmp(cmd, "sleep") == 0 || strcmp(cmd, "SLEEP") == 0) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("Usage: sleep <milliseconds>\n");
+
+    } else if (cmd[0] == 's' && cmd[1] == 'l' && cmd[2] == 'e' && cmd[3] == 'e' && cmd[4] == 'p' && cmd[5] == ' ') {
+        uint32_t ms = 0;
+        int i = 6;
+        while (cmd[i] >= '0' && cmd[i] <= '9') {
+            ms = ms * 10 + (cmd[i] - '0');
+            i++;
+        }
+
+        if (ms > 0) {
+            print_set_color(PRINT_COLOR_YELLOW, PRINT_COLOR_BLACK);
+            print_str("Sleeping for ");
+            print_uint64_dec(ms);
+            print_str(" ms...\n");
+
+            pit_sleep(ms);
+
+            print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+            print_str("Done.\n");
+        } else {
+            print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+            print_str("Usage: sleep <milliseconds>\n");
+        }
+        
     } else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "CLEAR") == 0) {
         print_clear();
+        
     } else if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "REBOOT") == 0) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("Rebooting CrimsonX...\n");
         sys_reboot();
+        
     } else if (strcmp(cmd, "meminfo") == 0 || strcmp(cmd, "MEMINFO") == 0) {
         uint64_t free_blocks = pmm_get_free_block_count();
         uint64_t used_blocks = pmm_get_used_block_count();
@@ -77,10 +121,12 @@ void execute_command(char* cmd) {
             print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
             print_str("  Allocation failed!\n");
         }
+        
     } else if (cmd[0] == 'e' && cmd[1] == 'c' && cmd[2] == 'h' && cmd[3] == 'o' && cmd[4] == ' ') {
         print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
         print_str(cmd + 5);
         print_str("\n");
+        
     } else {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("cxsh: command not found: ");

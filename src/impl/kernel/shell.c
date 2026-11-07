@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "keyboard.h"
 #include "print.h"
 #include "string.h"
 #include "x86_64/port.h"
@@ -15,6 +16,9 @@ static int sel_anchor = -1;
 static size_t prompt_row = 0;
 static size_t prompt_len = 6;
 static int max_rendered_len = 0;
+
+static char pending_command[SHELL_BUF_SIZE];
+static volatile int command_ready = 0;
 
 static void copy_selection(void) {
     if (sel_anchor == -1 || sel_anchor == cursor_pos) return;
@@ -143,14 +147,18 @@ void shell_init(void) {
     cursor_pos = 0;
     sel_anchor = -1;
     max_rendered_len = 0;
+    command_ready = 0;
     shell_buffer[0] = '\0';
     clip_buffer[0] = '\0';
+    pending_command[0] = '\0';
     prompt_row = print_get_row();
     shell_redraw();
 }
 
 void shell_handle_input(struct KeyboardEvent event) {
     if (event.type != KEYBOARD_EVENT_TYPE_MAKE) return;
+
+    if (command_ready) return;
 
     if (event.code == KEY_CODE_LEFT) {
         if (event.shift) {
@@ -177,7 +185,7 @@ void shell_handle_input(struct KeyboardEvent event) {
     }
 
     if (event.ctrl) {
-        if (event.code == 0x2E) { 
+        if (event.code == 0x2E) { // Ctrl+C
             if (sel_anchor != -1 && sel_anchor != cursor_pos) {
                 copy_selection();
                 sel_anchor = -1;
@@ -199,15 +207,15 @@ void shell_handle_input(struct KeyboardEvent event) {
                 shell_redraw();
             }
             return;
-        } else if (event.code == 0x2D) { 
+        } else if (event.code == 0x2D) { // Ctrl+X
             cut_selection();
             shell_redraw();
             return;
-        } else if (event.code == 0x2F) { 
+        } else if (event.code == 0x2F) { // Ctrl+V
             paste_clipboard();
             shell_redraw();
             return;
-        } else if (event.code == 0x26) { 
+        } else if (event.code == 0x26) { // Ctrl+L
             print_clear();
             prompt_row = 0;
             max_rendered_len = 0;
@@ -225,15 +233,14 @@ void shell_handle_input(struct KeyboardEvent event) {
         size_t total_rows = (prompt_len + buf_len) / 80;
         for (size_t r = 0; r < total_rows; r++) print_char('\n');
 
-        execute_command(shell_buffer);
-        
+        strcpy(pending_command, shell_buffer);
+        command_ready = 1;
+
         buf_len = 0;
         cursor_pos = 0;
         sel_anchor = -1;
         max_rendered_len = 0;
         shell_buffer[0] = '\0';
-        prompt_row = print_get_row();
-        shell_redraw();
     } else if (c == '\b') {
         if (sel_anchor != -1 && sel_anchor != cursor_pos) {
             delete_selection();
@@ -257,6 +264,15 @@ void shell_handle_input(struct KeyboardEvent event) {
             cursor_pos++;
             shell_buffer[buf_len] = '\0';
         }
+        shell_redraw();
+    }
+}
+
+void shell_update(void) {
+    if (command_ready) {
+        execute_command(pending_command);
+        command_ready = 0;
+        prompt_row = print_get_row();
         shell_redraw();
     }
 }

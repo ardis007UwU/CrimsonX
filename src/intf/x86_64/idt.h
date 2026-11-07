@@ -1,6 +1,8 @@
-#pragma once
+#ifndef IDT_H
+#define IDT_H
 
-#include <stdint.h>
+void idt_init(void);
+void idt_set_handler_keyboard(void (*handler)(void));
+void idt_set_handler_timer(void (*handler)(void));
 
-void idt_init();
-void idt_set_handler_keyboard(void (*handler)());
+#endif
