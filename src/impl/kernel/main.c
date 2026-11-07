@@ -6,10 +6,42 @@
 #include "x86_64/idt.h"
 #include "x86_64/pic.h"
 #include "x86_64/pit.h"
+#include "x86_64/syscall.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "mm/kmalloc.h"
 #include "kernel/process.h"
+#include "blkdev.h"
+#include "x86_64/ata.h"
+#include "fs/vfs.h"
+#include "fs/crimsonfs.h"
+
+static void ata_storage_init(void) {
+    print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+    print_str("[ata] probing IDE channels\n");
+
+    ata_init();
+    if (blkdev_count() == 0) {
+        print_set_color(PRINT_COLOR_BROWN, PRINT_COLOR_BLACK);
+        print_str("[ata] no IDE drive found\n");
+    }
+}
+
+static void crimsonfs_boot_mount(void) {
+    vfs_init();
+    crimsonfs_init();
+
+    if (blkdev_count() == 0) return;
+
+    vfs_node_t* root = crimsonfs_mount(blkdev_get(0));
+    if (root) {
+        print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+        print_str("[crimsonfs] volume mounted at /\n");
+    } else {
+        print_set_color(PRINT_COLOR_BROWN, PRINT_COLOR_BLACK);
+        print_str("[crimsonfs] no CrimsonFS volume on disk 0 (try: mkfs)\n");
+    }
+}
 
 void task_worker(void) {
     uint64_t ticks = 0;
@@ -34,6 +66,7 @@ void kernel_main(void) {
     /* Replace the minimal boot GDT with the full one (kernel/user segments + TSS)
      * before the IDT is built. Interrupts are still off here. */
     gdt_init();
+    print_serial_init();
 
     print_clear();
     print_set_color(PRINT_COLOR_YELLOW, PRINT_COLOR_BLACK);
@@ -51,14 +84,19 @@ void kernel_main(void) {
     keyboard_init();
     keyboard_set_handler(shell_handle_input);
 
-    asm volatile("sti");
-
     pmm_init(128ULL * 1024 * 1024);
     vmm_init();
     kmalloc_init();
 
+    asm volatile("sti");
+
     process_init();
     process_create(task_worker);
+
+    syscall_init();
+
+    ata_storage_init();
+    crimsonfs_boot_mount();
 
     shell_init();
 

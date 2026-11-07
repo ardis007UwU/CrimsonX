@@ -34,4 +34,9 @@ size_t print_get_row(void);
 void print_set_cursor(size_t c, size_t r);
 void print_put_char_at(char character, uint8_t color, size_t c, size_t r);
 
+/* COM1 debug mirror (serial echo of everything; safe no-op before setup) */
+void print_serial_init(void);
+void serial_echo(const char* s);
+void serial_put_hex64(uint64_t v);
+
 #endif
