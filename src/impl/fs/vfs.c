@@ -95,6 +95,25 @@ vfs_node_t* vfs_get_root(void) {
     return vfs_root;
 }
 
+int vfs_unlink(const char* path) {
+    if (!vfs_root || !vfs_root->unlink || !path || path[0] == '\0') return -1;
+
+    const char* p = path;
+    if (p[0] == '/') p++;
+    if (p[0] == '\0') return -1;
+
+    size_t len = 0;
+    while (p[len] != '\0' && p[len] != '/') len++;
+    if (p[len] != '\0') return -1;
+
+    char leaf[64];
+    if (len >= sizeof(leaf)) return -1;
+    for (size_t i = 0; i < len; i++) leaf[i] = p[i];
+    leaf[len] = '\0';
+
+    return vfs_root->unlink(vfs_root, leaf);
+}
+
 void vfs_init(void) {
     vfs_root = NULL;
 }

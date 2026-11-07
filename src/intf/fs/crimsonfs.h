@@ -46,7 +46,9 @@
 #define CRIMSONFS_DATA_LBA \
     (CRIMSONFS_INODE_LBA + CRIMSONFS_INODE_BLOCKS)                          /* 27 */
 #define CRIMSONFS_DIRECT_BLOCKS 16
-#define CRIMSONFS_MAX_FILE       (CRIMSONFS_DIRECT_BLOCKS * CRIMSONFS_BLOCK_SIZE)
+#define CRIMSONFS_INDIRECT_BLOCKS 128
+#define CRIMSONFS_MAX_FILE \
+    ((CRIMSONFS_DIRECT_BLOCKS + CRIMSONFS_INDIRECT_BLOCKS) * CRIMSONFS_BLOCK_SIZE)
 
 typedef struct {                 /* at LBA 0 */
     char     magic[8];           /* "CRIMFS0\0" */
@@ -119,5 +121,8 @@ vfs_node_t* crimsonfs_mount(blkdev_t* dev);
 
 /* Create an empty file named `name` inside `root`. 0 on success. */
 int crimsonfs_create(vfs_node_t* root, const char* name);
+
+/* Remove the named file from `root` and free all associated blocks. */
+int crimsonfs_unlink(vfs_node_t* root, const char* name);
 
 #endif

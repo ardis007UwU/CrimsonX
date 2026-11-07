@@ -122,11 +122,22 @@ static int inode_pread(crimsonfs_inode_t* in, uint64_t offset, void* buf, size_t
         size_t in_blk = (size_t)(pos & (CRIMSONFS_BLOCK_SIZE - 1));
         size_t take = CRIMSONFS_BLOCK_SIZE - in_blk;
         if (take > count - done) take = count - done;
-        if (bi >= CRIMSONFS_DIRECT_BLOCKS) break;
+        if (bi >= CRIMSONFS_DIRECT_BLOCKS + CRIMSONFS_INDIRECT_BLOCKS) break;
 
-        uint32_t bno = in->direct[bi];
+        uint32_t bno = 0;
+        if (bi < CRIMSONFS_DIRECT_BLOCKS) {
+            bno = in->direct[bi];
+        } else if (in->indirect != 0) {
+            uint32_t table[CRIMSONFS_INDIRECT_BLOCKS];
+            size_t idx = bi - CRIMSONFS_DIRECT_BLOCKS;
+            if (dev_read(in->indirect, 1, table) != 0) {
+                return done ? (int)done : -1;
+            }
+            bno = table[idx];
+        }
+
         if (bno == 0) {
-            zero8(out + done, take);       /* hole */
+            zero8(out + done, take);
         } else {
             if (dev_read(bno, 1, block) != 0) {
                 return done ? (int)done : -1;
@@ -143,23 +154,70 @@ static int inode_pread(crimsonfs_inode_t* in, uint64_t offset, void* buf, size_t
 static int inode_pwrite(crimsonfs_inode_t* in, uint64_t offset, const void* buf, size_t count) {
     uint8_t block[CRIMSONFS_BLOCK_SIZE];
     size_t done = 0;
+
     while (done < count) {
         uint64_t pos = offset + done;
         size_t bi = (size_t)(pos / CRIMSONFS_BLOCK_SIZE);
         size_t in_blk = (size_t)(pos & (CRIMSONFS_BLOCK_SIZE - 1));
         size_t take = CRIMSONFS_BLOCK_SIZE - in_blk;
         if (take > count - done) take = count - done;
-        if (bi >= CRIMSONFS_DIRECT_BLOCKS) break;
+        if (bi >= CRIMSONFS_DIRECT_BLOCKS + CRIMSONFS_INDIRECT_BLOCKS) break;
 
-        uint32_t bno = in->direct[bi];
+        uint32_t bno = 0;
+        if (bi < CRIMSONFS_DIRECT_BLOCKS) {
+            bno = in->direct[bi];
+        } else {
+            size_t idx = bi - CRIMSONFS_DIRECT_BLOCKS;
+            if (in->indirect == 0) {
+                int32_t nb = block_alloc();
+                if (nb < 0) break;
+                in->indirect = (uint32_t)nb;
+                uint32_t indirect_table[CRIMSONFS_INDIRECT_BLOCKS];
+                zero8(indirect_table, sizeof(indirect_table));
+                if (dev_write(in->indirect, 1, indirect_table) != 0) {
+                    block_free(in->indirect);
+                    in->indirect = 0;
+                    break;
+                }
+            }
+
+            uint32_t indirect_table[CRIMSONFS_INDIRECT_BLOCKS];
+            if (dev_read(in->indirect, 1, indirect_table) != 0) break;
+            bno = indirect_table[idx];
+            if (bno == 0) {
+                int32_t nb = block_alloc();
+                if (nb < 0) break;
+                bno = (uint32_t)nb;
+                indirect_table[idx] = bno;
+                if (dev_write(in->indirect, 1, indirect_table) != 0) {
+                    block_free(bno);
+                    break;
+                }
+            }
+        }
+
         if (bno == 0) {
             int32_t nb = block_alloc();
-            if (nb < 0) break;   /* volume full */
-            in->direct[bi] = (uint32_t)nb;
+            if (nb < 0) break;
             bno = (uint32_t)nb;
+            if (bi < CRIMSONFS_DIRECT_BLOCKS) {
+                in->direct[bi] = bno;
+            } else {
+                uint32_t indirect_table[CRIMSONFS_INDIRECT_BLOCKS];
+                size_t idx = bi - CRIMSONFS_DIRECT_BLOCKS;
+                if (dev_read(in->indirect, 1, indirect_table) != 0) {
+                    block_free(bno);
+                    break;
+                }
+                indirect_table[idx] = bno;
+                if (dev_write(in->indirect, 1, indirect_table) != 0) {
+                    block_free(bno);
+                    break;
+                }
+            }
             zero8(block, sizeof(block));
-        } else {
-            if (dev_read(bno, 1, block) != 0) break;   /* read-modify-write */
+        } else if (dev_read(bno, 1, block) != 0) {
+            break;
         }
 
         const uint8_t* src = (const uint8_t*)buf + done;
@@ -167,7 +225,8 @@ static int inode_pwrite(crimsonfs_inode_t* in, uint64_t offset, const void* buf,
         if (dev_write(bno, 1, block) != 0) break;
 
         done += take;
-        if (pos + take > in->size) in->size = (uint32_t)(pos + take);
+        uint64_t end = offset + done;
+        if (end > in->size) in->size = (uint32_t)end;
     }
     return (int)done;
 }
@@ -255,6 +314,7 @@ static vfs_node_t* cs_node_for(uint32_t ino, const char* name) {
     node->size = in->size;
     node->data = f;
     node->lookup = (in->type == CRIMFS_TYPE_DIR) ? cs_lookup : NULL;
+    node->unlink = (in->type == CRIMFS_TYPE_DIR) ? crimsonfs_unlink : NULL;
     node->open = NULL;
     node->close = cs_node_close;
     node->read = cs_node_read;
@@ -439,6 +499,7 @@ vfs_node_t* crimsonfs_mount(blkdev_t* dev) {
         fs_mount = NULL;
         return NULL;
     }
+    fs_root_node->unlink = crimsonfs_unlink;
     vfs_set_root(fs_root_node);
     return fs_root_node;
 
@@ -511,6 +572,74 @@ int crimsonfs_create(vfs_node_t* root, const char* name) {
     if (inodes_flush() != 0 || bitmap_flush() != 0 || super_flush() != 0) {
         return -1;
     }
+    root->size = din->size;
+    return 0;
+}
+
+int crimsonfs_unlink(vfs_node_t* root, const char* name) {
+    if (!fs_mount || !root || root->type != VFS_TYPE_DIR || !name || name[0] == '\0') return -1;
+
+    cs_file_t* d = (cs_file_t*)root->data;
+    crimsonfs_inode_t* din = inode_get(d->ino);
+    if (!din) return -1;
+
+    uint32_t target_ino = 0;
+    uint32_t dir_lba = 0;
+    size_t slot_index = 0;
+    uint8_t dir_block[CRIMSONFS_BLOCK_SIZE];
+    size_t per_block = CRIMSONFS_BLOCK_SIZE / sizeof(crimsonfs_dirent_t);
+
+    for (size_t bi = 0; bi < CRIMSONFS_DIRECT_BLOCKS; bi++) {
+        if (din->direct[bi] == 0) continue;
+        if (dev_read(din->direct[bi], 1, dir_block) != 0) return -1;
+
+        for (size_t s = 0; s < per_block; s++) {
+            crimsonfs_dirent_t* ent = (crimsonfs_dirent_t*)(dir_block + s * sizeof(crimsonfs_dirent_t));
+            if (ent->inode == 0) continue;
+            if (strcmp(ent->name, name) == 0) {
+                target_ino = ent->inode;
+                dir_lba = din->direct[bi];
+                slot_index = s;
+                break;
+            }
+        }
+        if (target_ino != 0) break;
+    }
+
+    if (target_ino == 0) return -1;
+
+    crimsonfs_inode_t* target = inode_get(target_ino);
+    if (!target || target->type == CRIMFS_TYPE_FREE || target->type == CRIMFS_TYPE_DIR) return -1;
+
+    for (size_t i = 0; i < CRIMSONFS_DIRECT_BLOCKS; i++) {
+        if (target->direct[i] != 0) {
+            block_free(target->direct[i]);
+            target->direct[i] = 0;
+        }
+    }
+
+    if (target->indirect != 0) {
+        uint32_t indirect_table[CRIMSONFS_INDIRECT_BLOCKS];
+        if (dev_read(target->indirect, 1, indirect_table) != 0) return -1;
+        for (size_t i = 0; i < CRIMSONFS_INDIRECT_BLOCKS; i++) {
+            if (indirect_table[i] != 0) block_free(indirect_table[i]);
+        }
+        block_free(target->indirect);
+        target->indirect = 0;
+    }
+
+    if (dev_read(dir_lba, 1, dir_block) != 0) return -1;
+    crimsonfs_dirent_t* entry = (crimsonfs_dirent_t*)(dir_block + slot_index * sizeof(crimsonfs_dirent_t));
+    zero8(entry, sizeof(*entry));
+    if (dev_write(dir_lba, 1, dir_block) != 0) return -1;
+
+    zero8(target, sizeof(*target));
+    target->type = CRIMFS_TYPE_FREE;
+    target->nlink = 0;
+    target->size = 0;
+    fs_mount->super.free_inodes++;
+
+    if (inodes_flush() != 0 || bitmap_flush() != 0 || super_flush() != 0) return -1;
     root->size = din->size;
     return 0;
 }

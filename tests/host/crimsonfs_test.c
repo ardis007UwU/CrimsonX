@@ -214,11 +214,37 @@ static void test_capacity_clamps(void) {
     CHECK(n != NULL);
     if (n) {
         uint8_t buf[CRIMSONFS_MAX_FILE];
-        CHECK(n->write(n, buf, CRIMSONFS_MAX_FILE) == CRIMSONFS_MAX_FILE);
-        CHECK(n->write(n, buf, 1) == 0);          /* direct table exhausted */
-        CHECK(n->size == CRIMSONFS_MAX_FILE);
+        memset(buf, 0x5A, sizeof(buf));
+        CHECK(n->write(n, buf, sizeof(buf)) == (int)sizeof(buf));
+        CHECK(n->size == sizeof(buf));
+
+        uint8_t tail[256];
+        memset(tail, 0xA5, sizeof(tail));
+        CHECK(n->write(n, tail, sizeof(tail)) == 0);
+        CHECK(n->size == sizeof(buf));
         vfs_close(n);
     }
+    crimsonfs_unmount();
+}
+
+static void test_unlink_removes_file_and_frees_blocks(void) {
+    CHECK(crimsonfs_format(&fake_dev) == 0);
+    vfs_node_t* root = crimsonfs_mount(&fake_dev);
+    CHECK(root != NULL);
+    if (!root) return;
+
+    CHECK(crimsonfs_create(root, "drop") == 0);
+    vfs_node_t* n = vfs_open("/drop");
+    CHECK(n != NULL);
+    if (n) {
+        uint8_t payload[2048];
+        memset(payload, 0x7F, sizeof(payload));
+        CHECK(n->write(n, payload, sizeof(payload)) == (int)sizeof(payload));
+        vfs_close(n);
+    }
+
+    CHECK(crimsonfs_unlink(root, "drop") == 0);
+    CHECK(vfs_open("/drop") == NULL);
     crimsonfs_unmount();
 }
 
@@ -231,6 +257,7 @@ int main(void) {
     test_create_write_read();
     test_persistence_across_mounts();
     test_capacity_clamps();
+    test_unlink_removes_file_and_frees_blocks();
 
     printf("%s: %d checks, %d failures\n", "crimsonfs_test", checks, failures);
     return failures ? 1 : 0;

@@ -69,6 +69,10 @@ static void shell_redraw(void) {
     size_t hw_cols = 80;
     size_t hw_rows = 25;
 
+    /* Keep the prompt row synchronized with the actual terminal cursor whenever
+     * command output has advanced the VGA hardware. */
+    prompt_row = print_get_row();
+
     int sel_min = -1;
     int sel_max = -1;
     if (sel_anchor != -1 && sel_anchor != cursor_pos) {
@@ -82,7 +86,6 @@ static void shell_redraw(void) {
     }
 
     size_t required_rows = (max_rendered_len / hw_cols) + 1;
-    
     while (prompt_row + required_rows > hw_rows) {
         print_set_cursor(0, hw_rows - 1);
         print_char('\n');
@@ -92,7 +95,7 @@ static void shell_redraw(void) {
     const char* prompt = "cxsh> ";
     uint8_t prompt_color = PRINT_COLOR_RED | (PRINT_COLOR_BLACK << 4);
     uint8_t arrow_color = PRINT_COLOR_WHITE | (PRINT_COLOR_BLACK << 4);
-    
+
     for (size_t i = 0; i < 4; i++) print_put_char_at(prompt[i], prompt_color, i, prompt_row);
     for (size_t i = 4; i < 6; i++) print_put_char_at(prompt[i], arrow_color, i, prompt_row);
 
@@ -126,15 +129,21 @@ static void shell_redraw(void) {
         }
     }
 
+    /* Clear only from the end of the live prompt buffer to the end of the
+     * current logical row/line; this avoids erasing previously rendered output
+     * on rows that were already completed by command output. */
     uint8_t clear_color = PRINT_COLOR_WHITE | (PRINT_COLOR_BLACK << 4);
-    for (int i = total_len; i <= max_rendered_len + 5; i++) {
-        print_put_char_at(' ', clear_color, current_c, current_r);
-        current_c++;
-        if (current_c >= hw_cols) {
-            current_c = 0;
-            current_r++;
+    size_t clear_c = (prompt_len + buf_len) % hw_cols;
+    size_t clear_r = prompt_row + ((prompt_len + buf_len) / hw_cols);
+    while (clear_r < hw_rows) {
+        size_t limit = (clear_r == prompt_row) ? hw_cols - clear_c : hw_cols;
+        for (size_t col = 0; col < limit; col++) {
+            print_put_char_at(' ', clear_color, clear_c + col, clear_r);
         }
+        clear_r++;
+        clear_c = 0;
     }
+
     max_rendered_len = total_len;
 
     size_t final_c = (prompt_len + cursor_pos) % hw_cols;
@@ -272,7 +281,11 @@ void shell_update(void) {
     if (command_ready) {
         execute_command(pending_command);
         command_ready = 0;
+        /* Sync the shell prompt to the screen cursor after the command output has
+         * advanced VGA rows, then clear the previous render bounds so ghost text
+         * does not overwrite the active input line. */
         prompt_row = print_get_row();
+        max_rendered_len = 0;
         shell_redraw();
     }
 }

@@ -192,6 +192,32 @@ static void cmd_cat(const char* name) {
     vfs_close(n);
 }
 
+static void cmd_rm(const char* name) {
+    if (!vfs_get_root()) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("rm: no CrimsonFS volume mounted\n");
+        return;
+    }
+
+    if (!name || name[0] == '\0') {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("Usage: rm <filename>\n");
+        return;
+    }
+
+    if (crimsonfs_unlink(vfs_get_root(), name) == 0) {
+        print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+        print_str("rm: removed ");
+        print_str((char*)name);
+        print_str("\n");
+    } else {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("rm: failed to remove ");
+        print_str((char*)name);
+        print_str("\n");
+    }
+}
+
 static void cmd_install(void) {
     vfs_node_t* root = vfs_get_root();
     if (!root) {
@@ -266,6 +292,7 @@ void execute_command(char* cmd) {
         print_str("\nstorage:\n");
         print_str("  ls      - List files on the mounted CrimsonFS\n");
         print_str("  cat     - cat <file>: dump a file's bytes\n");
+        print_str("  rm      - rm <file>: remove a file from CrimsonFS\n");
         print_str("  mkfs    - Format disk 0 as CrimsonFS and mount it\n");
         print_str("  install - Write the embedded hello.elf program to disk\n");
         print_str("  exec    - exec <path>: load ELF from CrimsonFS, spawn ring-3 task\n");
@@ -394,6 +421,9 @@ void execute_command(char* cmd) {
 
     } else if (cmd[0] == 'c' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == ' ') {
         cmd_cat(cmd + 4);
+
+    } else if (cmd[0] == 'r' && cmd[1] == 'm' && cmd[2] == ' ') {
+        cmd_rm(cmd + 3);
 
     } else if (strcmp(cmd, "install") == 0) {
         cmd_install();

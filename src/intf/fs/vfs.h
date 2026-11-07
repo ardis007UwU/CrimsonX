@@ -35,6 +35,7 @@ struct vfs_node {
     /* Directory lookup (dir nodes): resolve `name` inside `dir`. Returns a
      * fresh open node (fs-owned copy, freed via close()) or NULL. */
     vfs_node_t* (*lookup)(vfs_node_t* dir, const char* name);
+    int (*unlink)(vfs_node_t* dir, const char* name);
     int (*open)(vfs_node_t* node);
     int (*close)(vfs_node_t* node);
     /* Byte-stream I/O; files keep their cursor inside node->data.
@@ -65,6 +66,9 @@ vfs_node_t* vfs_keyboard_channel(void);
 /* Install the root directory produced by a filesystem driver. */
 void vfs_set_root(vfs_node_t* root);
 vfs_node_t* vfs_get_root(void);
+
+/* Remove a single file or directory entry relative to the mounted root. */
+int vfs_unlink(const char* path);
 
 /* Consume up to `count` bytes from an open file descriptor object. */
 int vfs_file_read(vfs_file_t* file, void* buf, size_t count);
