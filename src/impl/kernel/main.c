@@ -3,6 +3,8 @@
 #include "shell.h"
 #include "x86_64/idt.h"
 #include "x86_64/pic.h"
+#include "mm/pmm.h"
+#include "mm/kmalloc.h"
 
 void kernel_main(void) {
     print_clear();
@@ -16,6 +18,9 @@ void kernel_main(void) {
     keyboard_set_handler(shell_handle_input);
 
     asm volatile("sti");
+
+    pmm_init(128ULL * 1024 * 1024);
+    kmalloc_init(); // <--- Start the heap
 
     shell_init();
 
