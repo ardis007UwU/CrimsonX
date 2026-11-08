@@ -28,6 +28,11 @@
  * 15 SYS_MMAP    rdi=addr,rsi=len,rdx=prot,r10=flags,r8=fd,r9=offset
  * 16 SYS_PIPE    rdi = user int[2] receiving read/write descriptors
  * 17 SYS_MUNMAP  rdi = mapped address, rsi = mapped length
+ * 18 SYS_GETTIMEOFDAY rdi = timeval pointer, rsi = optional timezone pointer
+ * 19 SYS_MKDIR  rdi = path
+ * 20 SYS_CHDIR  rdi = path
+ * 21 SYS_GETCWD rdi = output buffer, rsi = capacity
+ * 22 SYS_KILL   rdi = PID, rsi = signal number (0 probes for existence)
  *
  * mmap currently supports read/write permissions, private file mappings, and
  * anonymous private/shared mappings. A zero address selects a free range;
@@ -53,6 +58,11 @@
 #define SYS_MMAP  15
 #define SYS_PIPE  16
 #define SYS_MUNMAP 17
+#define SYS_GETTIMEOFDAY 18
+#define SYS_MKDIR 19
+#define SYS_CHDIR 20
+#define SYS_GETCWD 21
+#define SYS_KILL 22
 
 #define SYS_PROT_READ  1
 #define SYS_PROT_WRITE 2
@@ -73,6 +83,12 @@ typedef struct {
     uint32_t st_mode; /**< POSIX-compatible file type and permission bits. */
     uint32_t st_size; /**< File size in bytes. */
 } syscall_stat_t;
+
+/** timeval layout used by SYS_GETTIMEOFDAY on the x86-64 ABI. */
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_usec;
+} syscall_timeval_t;
 
 #define SYS_S_IFMT  0170000U
 #define SYS_S_IFDIR 0040000U

@@ -97,52 +97,181 @@ vfs_node_t* vfs_get_root(void) {
 }
 
 int vfs_unlink(const char* path) {
-    if (!vfs_root || !vfs_root->unlink || !path || path[0] == '\0') return -1;
-
-    const char* p = path;
-    if (p[0] == '/') p++;
-    if (p[0] == '\0') return -1;
-
-    size_t len = 0;
-    while (p[len] != '\0' && p[len] != '/') len++;
-    if (p[len] != '\0') return -1;
-
-    char leaf[64];
-    if (len >= sizeof(leaf)) return -1;
-    for (size_t i = 0; i < len; i++) leaf[i] = p[i];
-    leaf[len] = '\0';
-
-    return vfs_root->unlink(vfs_root, leaf);
+    return vfs_unlink_at(path, "/");
 }
 
 void vfs_init(void) {
     vfs_root = NULL;
 }
 
-vfs_node_t* vfs_open(const char* path) {
-    if (!path || !vfs_root || !vfs_root->lookup) return NULL;
+static size_t bounded_strlen(const char* value, size_t limit) {
+    size_t length = 0;
+    if (!value) return limit;
+    while (length < limit && value[length] != '\0') length++;
+    return length;
+}
 
-    /* "/" (or "") resolves through the fs driver so fresh node state is
-     * owned per-open; the fs special-cases the empty name for its root. */
-    const char* p = path;
-    if (p[0] == '/') p++;
-    size_t len = 0;
-    while (p[len] != '\0' && p[len] != '/') len++;
+static int append_path_components(const char* source, size_t source_length,
+                                  char* output, size_t capacity, size_t* length) {
+    size_t position = 0;
+    while (position < source_length) {
+        while (position < source_length && source[position] == '/') position++;
+        if (position == source_length) break;
 
-    if (p[len] != '\0') return NULL;
+        size_t begin = position;
+        while (position < source_length && source[position] != '/') position++;
+        size_t component_length = position - begin;
+        if (component_length == 1 && source[begin] == '.') continue;
+        if (component_length == 2 && source[begin] == '.' &&
+            source[begin + 1] == '.') {
+            if (*length > 1) {
+                size_t trim = *length;
+                while (trim > 1 && output[trim - 1] != '/') trim--;
+                *length = trim > 1 ? trim - 1 : 1;
+                output[*length] = '\0';
+            }
+            continue;
+        }
+        if (component_length > 55) return -1;
 
-    char leaf[64];
-    if (len >= sizeof(leaf)) return NULL;
-    for (size_t i = 0; i < len; i++) leaf[i] = p[i];
-    leaf[len] = '\0';
+        size_t separator = *length > 1 ? 1 : 0;
+        if (*length >= capacity || separator > capacity - *length ||
+            component_length >= capacity - *length - separator) return -1;
+        if (separator) output[(*length)++] = '/';
+        for (size_t i = 0; i < component_length; i++) {
+            output[(*length)++] = source[begin + i];
+        }
+        output[*length] = '\0';
+    }
+    return 0;
+}
 
-    vfs_node_t* found = vfs_root->lookup(vfs_root, leaf);
-    if (!found) return NULL;
-    if (found->open && found->open(found) != 0) {
-        vfs_close(found);
+int vfs_resolve_path(const char* path, const char* cwd, char* output,
+                     size_t capacity) {
+    if (!path || !cwd || !output || capacity < 2) return -1;
+    size_t path_length = bounded_strlen(path, VFS_PATH_MAX);
+    size_t cwd_length = bounded_strlen(cwd, VFS_PATH_MAX);
+    if (path_length >= VFS_PATH_MAX || cwd_length >= VFS_PATH_MAX ||
+        cwd_length == 0 || cwd[0] != '/') return -1;
+
+    output[0] = '/';
+    output[1] = '\0';
+    size_t length = 1;
+    if (path[0] != '/' &&
+        append_path_components(cwd, cwd_length, output, capacity, &length) != 0) {
+        return -1;
+    }
+    if (append_path_components(path, path_length, output, capacity, &length) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+vfs_node_t* vfs_open_at(const char* path, const char* cwd) {
+    if (!vfs_root || !vfs_root->lookup) return NULL;
+    char normalized[VFS_PATH_MAX];
+    if (vfs_resolve_path(path, cwd, normalized, sizeof(normalized)) != 0) return NULL;
+
+    vfs_node_t* current = vfs_root->lookup(vfs_root, "");
+    if (!current || current->type != VFS_TYPE_DIR) {
+        if (current) vfs_close(current);
         return NULL;
     }
-    return found;
+
+    size_t position = 1;
+    size_t path_length = strlen(normalized);
+    while (position < path_length) {
+        size_t begin = position;
+        while (position < path_length && normalized[position] != '/') position++;
+        size_t component_length = position - begin;
+        if (component_length == 0 || component_length > 55 ||
+            current->type != VFS_TYPE_DIR || !current->lookup) {
+            vfs_close(current);
+            return NULL;
+        }
+
+        char component[56];
+        for (size_t i = 0; i < component_length; i++) {
+            component[i] = normalized[begin + i];
+        }
+        component[component_length] = '\0';
+
+        vfs_node_t* child = current->lookup(current, component);
+        vfs_close(current);
+        if (!child) return NULL;
+        current = child;
+        if (position < path_length) position++;
+    }
+
+    if (current->open && current->open(current) != 0) {
+        vfs_close(current);
+        return NULL;
+    }
+    return current;
+}
+
+vfs_node_t* vfs_open(const char* path) {
+    return vfs_open_at(path, "/");
+}
+
+int vfs_chdir(const char* path, const char* cwd, char* output, size_t capacity) {
+    if (vfs_resolve_path(path, cwd, output, capacity) != 0) return -1;
+    vfs_node_t* node = vfs_open_at(output, "/");
+    if (!node) return -1;
+    int is_directory = node->type == VFS_TYPE_DIR;
+    vfs_close(node);
+    return is_directory ? 0 : -1;
+}
+
+static int split_parent_path(const char* path, const char* cwd,
+                             char* parent, size_t parent_capacity,
+                             char* leaf, size_t leaf_capacity) {
+    char normalized[VFS_PATH_MAX];
+    if (vfs_resolve_path(path, cwd, normalized, sizeof(normalized)) != 0) return -1;
+    size_t length = strlen(normalized);
+    if (length <= 1) return -1;
+
+    size_t separator = length;
+    while (separator > 0 && normalized[separator - 1] != '/') separator--;
+    if (separator == 0) return -1;
+    size_t leaf_length = length - separator;
+    if (leaf_length == 0 || leaf_length >= leaf_capacity ||
+        separator >= parent_capacity) return -1;
+
+    size_t parent_length = separator == 1 ? 1 : separator - 1;
+    for (size_t i = 0; i < parent_length; i++) parent[i] = normalized[i];
+    parent[parent_length] = '\0';
+    for (size_t i = 0; i < leaf_length; i++) leaf[i] = normalized[separator + i];
+    leaf[leaf_length] = '\0';
+    return 0;
+}
+
+int vfs_mkdir_at(const char* path, const char* cwd) {
+    if (!vfs_root) return -1;
+    char parent_path[VFS_PATH_MAX];
+    char leaf[56];
+    if (split_parent_path(path, cwd, parent_path, sizeof(parent_path),
+                          leaf, sizeof(leaf)) != 0) return -1;
+    vfs_node_t* parent = vfs_open_at(parent_path, "/");
+    if (!parent) return -1;
+    int result = (parent->type == VFS_TYPE_DIR && parent->mkdir)
+                     ? parent->mkdir(parent, leaf) : -1;
+    vfs_close(parent);
+    return result;
+}
+
+int vfs_unlink_at(const char* path, const char* cwd) {
+    if (!vfs_root) return -1;
+    char parent_path[VFS_PATH_MAX];
+    char leaf[56];
+    if (split_parent_path(path, cwd, parent_path, sizeof(parent_path),
+                          leaf, sizeof(leaf)) != 0) return -1;
+    vfs_node_t* parent = vfs_open_at(parent_path, "/");
+    if (!parent) return -1;
+    int result = (parent->type == VFS_TYPE_DIR && parent->unlink)
+                     ? parent->unlink(parent, leaf) : -1;
+    vfs_close(parent);
+    return result;
 }
 
 int vfs_close(vfs_node_t* node) {

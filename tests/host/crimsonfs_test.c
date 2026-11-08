@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "fs/crimsonfs.h"
 #include "fs/vfs.h"
+#include "drivers/rtc.h"
 #include "mm/kmalloc.h"
 #include "string.h"   /* src/intf/string.h via -I; system one is shadowed */
 
@@ -19,6 +20,13 @@
 
 void* kmalloc(size_t size) { return malloc(size); }
 void kfree(void* p) { free(p); }
+
+static uint64_t fake_unix_time = 1700000000ULL;
+int rtc_get_unix_time(uint64_t* seconds) {
+    if (!seconds) return -1;
+    *seconds = fake_unix_time;
+    return 0;
+}
 
 static void stub_print(void) { /* quiet */ }
 
@@ -299,6 +307,84 @@ static void test_unlink_removes_file_and_frees_blocks(void) {
     crimsonfs_unmount();
 }
 
+static void test_creation_and_modification_timestamps(void) {
+    fake_unix_time = 1700000000ULL;
+    CHECK(crimsonfs_format(&fake_dev) == 0);
+    vfs_node_t* root = crimsonfs_mount(&fake_dev);
+    CHECK(root != NULL);
+    if (!root) return;
+
+    CHECK(crimsonfs_create(root, "dated") == 0);
+    crimsonfs_inode_t* inodes = (crimsonfs_inode_t*)backing[CRIMSONFS_INODE_LBA];
+    crimsonfs_dirent_t* entries =
+        (crimsonfs_dirent_t*)&backing[inodes[1].direct[0]][0];
+    uint32_t file_ino = 0;
+    for (size_t i = 0; i < CRIMSONFS_BLOCK_SIZE / sizeof(*entries); i++) {
+        if (entries[i].inode != 0 && strcmp(entries[i].name, "dated") == 0) {
+            file_ino = entries[i].inode;
+            break;
+        }
+    }
+    CHECK(file_ino != 0);
+
+    crimsonfs_timestamp_t* timestamps = (crimsonfs_timestamp_t*)
+        ((uint8_t*)inodes + CRIMSONFS_TIMESTAMP_OFFSET);
+    CHECK(timestamps[file_ino].creation_time == 1700000000U);
+    CHECK(timestamps[file_ino].modification_time == 1700000000U);
+
+    fake_unix_time += 125;
+    vfs_node_t* file = vfs_open("/dated");
+    CHECK(file != NULL);
+    if (file) {
+        CHECK(file->write(file, "x", 1) == 1);
+        vfs_close(file);
+    }
+    CHECK(timestamps[file_ino].creation_time == 1700000000U);
+    CHECK(timestamps[file_ino].modification_time == 1700000125U);
+    CHECK(crimsonfs_unmount() == 0);
+}
+
+static void test_nested_directories_and_paths(void) {
+    fake_unix_time = 1700000200ULL;
+    CHECK(crimsonfs_format(&fake_dev) == 0);
+    vfs_node_t* root = crimsonfs_mount(&fake_dev);
+    CHECK(root != NULL);
+    if (!root) return;
+
+    CHECK(vfs_mkdir_at("a", "/") == 0);
+    CHECK(vfs_mkdir_at("b", "/a") == 0);
+    CHECK(vfs_mkdir_at("/a/b", "/") != 0);
+    vfs_node_t* nested = vfs_open_at("/a/b", "/");
+    CHECK(nested != NULL && nested->type == VFS_TYPE_DIR);
+    if (!nested) {
+        crimsonfs_unmount();
+        return;
+    }
+    CHECK(crimsonfs_create(nested, "file") == 0);
+    vfs_close(nested);
+
+    vfs_node_t* file = vfs_open_at("../b/./file", "/a/b");
+    CHECK(file != NULL && file->type == VFS_TYPE_FILE);
+    if (file) vfs_close(file);
+    file = vfs_open_at("../../../../a/b/file", "/a/b");
+    CHECK(file != NULL);
+    if (file) vfs_close(file);
+
+    char cwd[VFS_PATH_MAX];
+    CHECK(vfs_chdir("b/..", "/a", cwd, sizeof(cwd)) == 0);
+    CHECK(strcmp(cwd, "/a") == 0);
+    CHECK(vfs_chdir("../a/b", "/a", cwd, sizeof(cwd)) == 0);
+    CHECK(strcmp(cwd, "/a/b") == 0);
+    CHECK(vfs_chdir("file", "/a/b", cwd, sizeof(cwd)) != 0);
+
+    CHECK(vfs_unlink_at("b", "/a") != 0);
+    CHECK(vfs_unlink_at("file", "/a/b") == 0);
+    CHECK(vfs_unlink_at("b", "/a") == 0);
+    CHECK(vfs_unlink_at("a", "/") == 0);
+    CHECK(vfs_open("/a") == NULL);
+    CHECK(crimsonfs_unmount() == 0);
+}
+
 int main(void) {
     for (size_t i = 0; i < FAKE_BLOCKS; i++) {
         for (size_t j = 0; j < BLKDEV_BLOCK_SIZE; j++) backing[i][j] = 0x55;
@@ -310,6 +396,8 @@ int main(void) {
     test_capacity_clamps();
     test_vfs_file_seek_and_access_modes();
     test_unlink_removes_file_and_frees_blocks();
+    test_creation_and_modification_timestamps();
+    test_nested_directories_and_paths();
 
     printf("%s: %d checks, %d failures\n", "crimsonfs_test", checks, failures);
     return failures ? 1 : 0;

@@ -1,0 +1,10 @@
+#ifndef KERNEL_SIGNAL_H
+#define KERNEL_SIGNAL_H
+
+#define KERNEL_SIGINT  2
+#define KERNEL_SIGKILL 9
+#define KERNEL_SIGSEGV 11
+#define KERNEL_SIGTERM 15
+#define KERNEL_SIGNAL_MAX 31
+
+#endif

@@ -7,6 +7,7 @@
 
 #define IDT_IRQ0_TIMER 0x20
 #define IDT_IRQ1_KEYBOARD 0x21
+#define IDT_IRQ12_MOUSE 0x2C
 
 #define IDT_GATE_PRESENT (1 << 7)
 #define IDT_GATE_DPL0 (0b00 << 5)
@@ -37,10 +38,12 @@ struct IdtPtr idt_ptr;
 
 void (*idt_handler_keyboard_user)(void) = NULL;
 void (*idt_handler_timer_user)(void) = NULL;
+void (*idt_handler_mouse_user)(void) = NULL;
 
 extern void idt_load(struct IdtPtr* idt_ptr);
 extern void idt_handler_keyboard_wrapped(void);
 extern void idt_handler_timer_wrapped(void);
+extern void idt_handler_mouse_wrapped(void);
 
 void idt_set_entry(uint8_t vector, uint64_t isr_addr, uint16_t selector, uint8_t type) {
     idt[vector] = (struct IdtEntry) {
@@ -69,6 +72,13 @@ void idt_handler_timer(void) {
     }
 }
 
+void idt_handler_mouse(void) {
+    if (idt_handler_mouse_user != NULL) {
+        idt_handler_mouse_user();
+    }
+    pic_eoi_slave();
+}
+
 void idt_init(void) {
     pic_remap();
     
@@ -85,6 +95,7 @@ void idt_init(void) {
 
     idt_set_entry(IDT_IRQ0_TIMER, (uint64_t) idt_handler_timer_wrapped, GDT_SELECTOR_CS_KERNEL, IDT_ENTRY_TYPE_INTERRUPT);
     idt_set_entry(IDT_IRQ1_KEYBOARD, (uint64_t) idt_handler_keyboard_wrapped, GDT_SELECTOR_CS_KERNEL, IDT_ENTRY_TYPE_INTERRUPT);
+    idt_set_entry(IDT_IRQ12_MOUSE, (uint64_t) idt_handler_mouse_wrapped, GDT_SELECTOR_CS_KERNEL, IDT_ENTRY_TYPE_INTERRUPT);
     
     idt_load(&idt_ptr);
     
@@ -97,4 +108,8 @@ void idt_set_handler_keyboard(void (*handler)(void)) {
 
 void idt_set_handler_timer(void (*handler)(void)) {
     idt_handler_timer_user = handler;
+}
+
+void idt_set_handler_mouse(void (*handler)(void)) {
+    idt_handler_mouse_user = handler;
 }

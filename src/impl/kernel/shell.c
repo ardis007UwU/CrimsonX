@@ -4,6 +4,8 @@
 #include "string.h"
 #include "x86_64/port.h"
 #include "commands.h"
+#include "kernel/process.h"
+#include "kernel/signal.h"
 
 #define SHELL_BUF_SIZE 512
 
@@ -166,6 +168,14 @@ void shell_init(void) {
 
 void shell_handle_input(struct KeyboardEvent event) {
     if (event.type != KEYBOARD_EVENT_TYPE_MAKE) return;
+
+    if (event.ctrl && event.code == 0x2E) {
+        uint64_t foreground_pid = process_get_foreground();
+        if (foreground_pid != 0 &&
+            process_send_signal((int64_t)foreground_pid, KERNEL_SIGINT) == 0) {
+            return;
+        }
+    }
 
     if (command_ready) return;
 

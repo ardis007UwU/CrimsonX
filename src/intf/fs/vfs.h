@@ -24,6 +24,7 @@
 #define VFS_SEEK_SET 0
 #define VFS_SEEK_CUR 1
 #define VFS_SEEK_END 2
+#define VFS_PATH_MAX 256
 
 #define VFS_TYPE_UNKNOWN 0
 #define VFS_TYPE_FILE    1
@@ -41,6 +42,8 @@ struct vfs_node {
     vfs_node_t* (*lookup)(vfs_node_t* dir, const char* name);
     /** Remove a child entry from this directory. */
     int (*unlink)(vfs_node_t* dir, const char* name);
+    /** Create a child directory within this directory. */
+    int (*mkdir)(vfs_node_t* dir, const char* name);
     /** Open per-node resources; return zero on success. */
     int (*open)(vfs_node_t* node);
     /** Release per-node resources before the node is freed. */
@@ -65,12 +68,20 @@ typedef struct {
 void vfs_init(void);
 
 /**
- * Open a root-relative path.
- * @param path NUL-terminated path; only the root and one-level names are supported.
+ * Open a path relative to the filesystem root.
+ * @param path NUL-terminated path with slash-separated components.
  * @return Fresh open node, owned by the caller, or NULL on failure.
  */
 vfs_node_t* vfs_open(const char* path);
 
+/** Open a path relative to cwd, resolving "." and ".." components. */
+vfs_node_t* vfs_open_at(const char* path, const char* cwd);
+/** Normalize a path to an absolute, canonical path. */
+int vfs_resolve_path(const char* path, const char* cwd, char* output, size_t capacity);
+/** Verify a path names a directory and return its canonical absolute path. */
+int vfs_chdir(const char* path, const char* cwd, char* output, size_t capacity);
+/** Create a directory at a path relative to cwd. */
+int vfs_mkdir_at(const char* path, const char* cwd);
 /**
  * Close and release a node returned by vfs_open().
  * @param node Node to close.
@@ -89,11 +100,12 @@ void vfs_set_root(vfs_node_t* root);
 vfs_node_t* vfs_get_root(void);
 
 /**
- * Remove a root-relative entry.
- * @param path One-level root-relative path.
+ * Remove an entry at a path relative to the filesystem root.
  * @return Filesystem result, or -1 for invalid paths/unsupported operations.
  */
 int vfs_unlink(const char* path);
+/** Remove an entry at a path relative to cwd. */
+int vfs_unlink_at(const char* path, const char* cwd);
 
 /**
  * Read up to count bytes from an open file.

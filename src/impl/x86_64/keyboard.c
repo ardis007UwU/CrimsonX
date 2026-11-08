@@ -1,7 +1,6 @@
 #include "keyboard.h"
 #include "x86_64/idt.h"
 #include "x86_64/ps2.h"
-#include "x86_64/pic.h"
 #include "kernel/process.h"
 #include "kernel/irq.h"
 #include <stddef.h>
@@ -70,7 +69,6 @@ static void idt_handler_keyboard_user(void) {
 
     if (scancode == 0xE0) {
         is_e0 = 1;
-        pic_eoi_master();
         return;
     }
 
@@ -102,7 +100,6 @@ static void idt_handler_keyboard_user(void) {
     }
 
     is_e0 = 0;
-    pic_eoi_master();
 }
 
 void keyboard_init(void) {

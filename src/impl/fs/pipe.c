@@ -109,6 +109,7 @@ static vfs_node_t* pipe_node_create(const char* name, pipe_state_t* state,
     node->data = endpoint;
     node->lookup = NULL;
     node->unlink = NULL;
+    node->mkdir = NULL;
     node->open = NULL;
     node->close = pipe_close;
     node->read = is_reader ? pipe_read : NULL;

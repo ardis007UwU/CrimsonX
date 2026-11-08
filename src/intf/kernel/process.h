@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "fs/vfs.h"
+#include "kernel/signal.h"
 
 struct syscall_frame;
 struct vm_mapping;
@@ -38,6 +39,9 @@ typedef struct task {
     uint64_t mmap_base;
     uint64_t mmap_next;
     struct vm_mapping* mappings;
+    char cwd[VFS_PATH_MAX];
+    uint64_t pending_signals;
+    uint64_t signal_handlers[KERNEL_SIGNAL_MAX + 1];
 
     /* Ring-3 state used by the exec/spawn machinery (exec.c) */
     uint64_t user_entry;      /* ring-3 entry point (syscall ABI-safe) */
@@ -88,5 +92,13 @@ int64_t process_waitpid(int64_t pid, int32_t* status);
  * Rejects occupied tables; allocation failure leaves an initially empty table.
  */
 int process_fd_defaults(task_t* task);
+/** Queue a supported signal for a task PID; signal zero probes for existence. */
+int process_send_signal(int64_t pid, uint32_t signal);
+/** Deliver one pending default-action signal to the current task. */
+void process_handle_pending_signal(void);
+/** Select the process interrupted by shell Ctrl+C; PID zero clears it. */
+void process_set_foreground(uint64_t pid);
+/** @return The current foreground PID, or zero when none is selected. */
+uint64_t process_get_foreground(void);
 
 #endif

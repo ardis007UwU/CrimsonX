@@ -23,6 +23,7 @@ void pit_init(uint32_t frequency) {
 void pit_handler(void) {
     pit_ticks++;
     pic_eoi_master();
+    process_handle_pending_signal();
     schedule();
 }
 

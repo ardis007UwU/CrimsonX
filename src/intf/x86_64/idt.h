@@ -7,5 +7,7 @@ void idt_init(void);
 void idt_set_handler_keyboard(void (*handler)(void));
 /** Register the timer interrupt callback. */
 void idt_set_handler_timer(void (*handler)(void));
+/** Register the PS/2 mouse interrupt callback. */
+void idt_set_handler_mouse(void (*handler)(void));
 
 #endif

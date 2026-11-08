@@ -12,6 +12,7 @@
 ; part of the saved frame (rax also carries the syscall number).
 
 extern syscall_handler
+extern process_handle_pending_signal
 extern current_task
 extern syscall_scratch_rsp
 extern syscall_scratch_rax
@@ -61,6 +62,11 @@ syscall_entry:
     cld
     mov rdi, rsp                            ; arg0 = struct syscall_frame*
     call syscall_handler
+    push rax
+    sub rsp, 8                              ; preserve 16-byte call alignment
+    call process_handle_pending_signal
+    add rsp, 8
+    pop rax
 
 syscall_return:
     ; RAX contains the return value from syscall_handler

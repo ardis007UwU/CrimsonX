@@ -1,5 +1,6 @@
 extern idt_handler_keyboard
 extern idt_handler_timer
+extern idt_handler_mouse
 
 global idt_load
 
@@ -52,3 +53,4 @@ idt_load:
 
 WRAPPED_HANDLER idt_handler_keyboard
 WRAPPED_HANDLER idt_handler_timer
+WRAPPED_HANDLER idt_handler_mouse

@@ -1,4 +1,6 @@
 #include "print.h"
+#include "drivers/pci.h"
+#include "drivers/mouse.h"
 #include "keyboard.h"
 #include "shell.h"
 #include "x86_64/port.h"
@@ -87,6 +89,13 @@ void kernel_main(void) {
     pmm_init(128ULL * 1024 * 1024);
     vmm_init();
     kmalloc_init();
+
+    pci_init();
+    if (mouse_init() != 0) {
+        print_str("[mouse] PS/2 mouse unavailable\n");
+    } else {
+        print_str("[mouse] PS/2 mouse enabled on IRQ 12\n");
+    }
 
     asm volatile("sti");
 

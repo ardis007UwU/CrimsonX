@@ -30,7 +30,7 @@ static int exec_replace_current_internal(task_t* task, const char* path,
     if (!task || !task->kernel_stack_top) return -1;
     if (!path || path[0] == '\0') return -1;
 
-    vfs_node_t* node = vfs_open(path);
+    vfs_node_t* node = vfs_open_at(path, task->cwd);
     if (!node) return -1;
     if (node->type != VFS_TYPE_FILE) {
         vfs_close(node);

@@ -8,6 +8,7 @@
 #include "kernel/exec.h"
 #include "kernel/elf64.h"
 #include "kernel/mmap.h"
+#include "drivers/rtc.h"
 #include "mm/vmm.h"
 #include "mm/kmalloc.h"
 
@@ -203,7 +204,7 @@ static int syscall_open(task_t* task, uint64_t user_path, uint64_t raw_mode) {
     }
     if (fd < 0) return -1;
 
-    vfs_node_t* node = vfs_open(path);
+    vfs_node_t* node = vfs_open_at(path, task->cwd);
     if (!node || node->type != VFS_TYPE_FILE) {
         if (node) vfs_close(node);
         return -1;
@@ -292,6 +293,18 @@ static int syscall_pipe(task_t* task, uint64_t user_fds) {
     task->fds[read_fd] = reader;
     task->fds[write_fd] = writer;
     return 0;
+}
+
+static int syscall_gettimeofday(uint64_t user_timeval) {
+    syscall_timeval_t time_value;
+    uint64_t seconds = 0;
+    if (user_timeval == 0 ||
+        validate_user_range(user_timeval, sizeof(time_value), 1) != 0 ||
+        rtc_get_unix_time(&seconds) != 0 || seconds > INT64_MAX) return -1;
+
+    time_value.tv_sec = (int64_t)seconds;
+    time_value.tv_usec = 0;
+    return copy_user_memory(&time_value, user_timeval, sizeof(time_value), 1);
 }
 
 uint64_t syscall_handler(struct syscall_frame* frame) {
@@ -384,7 +397,8 @@ uint64_t syscall_handler(struct syscall_frame* frame) {
             if (read_user_string(path, (const void*)(uintptr_t)frame->rdi, sizeof(path)) != 0) {
                 return (uint64_t)-1;
             }
-            vfs_node_t* node = vfs_open(path);
+            if (!task) return (uint64_t)-1;
+            vfs_node_t* node = vfs_open_at(path, task->cwd);
             if (!node) return (uint64_t)-1;
             if (node->type == VFS_TYPE_DIR) {
                 status.st_mode = SYS_S_IFDIR | 0755U;
@@ -473,6 +487,54 @@ uint64_t syscall_handler(struct syscall_frame* frame) {
 
         case SYS_PIPE:
             return syscall_pipe(task, frame->rdi) == 0 ? 0 : (uint64_t)-1;
+
+        case SYS_GETTIMEOFDAY:
+            return syscall_gettimeofday(frame->rdi) == 0 ? 0 : (uint64_t)-1;
+
+        case SYS_MKDIR: {
+            char path[USER_PATH_MAX];
+            if (!task ||
+                read_user_string(path, (const void*)(uintptr_t)frame->rdi,
+                                 sizeof(path)) != 0 ||
+                vfs_mkdir_at(path, task->cwd) != 0) return (uint64_t)-1;
+            return 0;
+        }
+
+        case SYS_CHDIR: {
+            char path[USER_PATH_MAX];
+            char new_cwd[VFS_PATH_MAX];
+            if (!task ||
+                read_user_string(path, (const void*)(uintptr_t)frame->rdi,
+                                 sizeof(path)) != 0 ||
+                vfs_chdir(path, task->cwd, new_cwd, sizeof(new_cwd)) != 0) {
+                return (uint64_t)-1;
+            }
+            for (size_t i = 0; i < sizeof(task->cwd); i++) {
+                task->cwd[i] = new_cwd[i];
+                if (new_cwd[i] == '\0') break;
+            }
+            return 0;
+        }
+
+        case SYS_GETCWD: {
+            if (!task || frame->rdi == 0 || frame->rsi == 0) return (uint64_t)-1;
+            size_t length = 0;
+            while (length < sizeof(task->cwd) && task->cwd[length] != '\0') length++;
+            if (length == sizeof(task->cwd) || frame->rsi < length + 1 ||
+                validate_user_range(frame->rdi, length + 1, 1) != 0 ||
+                copy_user_memory(task->cwd, frame->rdi, length + 1, 1) != 0) {
+                return (uint64_t)-1;
+            }
+            return frame->rdi;
+        }
+
+        case SYS_KILL:
+            if (frame->rdi > INT64_MAX || frame->rsi > UINT32_MAX ||
+                process_send_signal((int64_t)frame->rdi,
+                                    (uint32_t)frame->rsi) != 0) {
+                return (uint64_t)-1;
+            }
+            return 0;
 
         default:
             return (uint64_t)-1;

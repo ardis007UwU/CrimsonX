@@ -11,7 +11,8 @@
  *       The native filesystem of CrimsonX
  *
  * A small volume format with a superblock, fixed allocation bitmap, flat inode
- * table, direct block pointers, and one single-indirect block table.
+ * table, per-inode timestamps, direct block pointers, and one single-indirect
+ * block table.
  *
  * On-disk layout (blocks are 512 bytes == one LBA):
  *
@@ -19,16 +20,18 @@
  *   LBA 1...    block allocation bitmap (fixed CrimsonFS_BITMAP_BLOCKS,
  *               supports volumes up to 65536 blocks / 32 MiB; growth:
  *               make the bitmap multiple blocks and version-bump)
- *   LBA ...     inode table (CrimsonFS_INODE_COUNT * 80 bytes)
+ *   LBA ...     inode records and per-inode creation/modification timestamps
  *   LBA ...     data blocks (allocation bitmap from here forward)
  *
  * Inodes support 16 direct and 128 indirect data blocks. Directories use
  * direct blocks containing arrays of crimsonfs_dirent_t. Inode 1 is the root;
- * paths are single-level.
+ * VFS resolves hierarchical paths through directory inodes. Version 2 volumes
+ * require formatting and store creation/modification times as 32-bit Unix
+ * epoch seconds in the final inode-table block.
  */
 
 #define CRIMSONFS_MAGIC        "CRIMFS0"
-#define CRIMSONFS_VERSION      1
+#define CRIMSONFS_VERSION      2
 #define CRIMSONFS_BLOCK_SIZE   512
 
 #define CRIMSONFS_BITMAP_LBA     1
@@ -38,11 +41,12 @@
 
 #define CRIMSONFS_INODE_BLOCK_SIZE 80
 #define CRIMSONFS_INODE_COUNT      64
+#define CRIMSONFS_TIMESTAMP_OFFSET (CRIMSONFS_INODE_COUNT * CRIMSONFS_INODE_BLOCK_SIZE)
 #define CRIMSONFS_INODE_LBA \
     (CRIMSONFS_BITMAP_LBA + CRIMSONFS_BITMAP_BLOCKS)                        /* 17 */
-#define CRIMSONFS_INODE_BLOCKS  10 /* 64 * 80 = 5120 = 10 * 512 */
+#define CRIMSONFS_INODE_BLOCKS  11 /* inode records plus 64 timestamp pairs */
 #define CRIMSONFS_DATA_LBA \
-    (CRIMSONFS_INODE_LBA + CRIMSONFS_INODE_BLOCKS)                          /* 27 */
+    (CRIMSONFS_INODE_LBA + CRIMSONFS_INODE_BLOCKS)
 #define CRIMSONFS_DIRECT_BLOCKS 16
 #define CRIMSONFS_INDIRECT_BLOCKS 128
 #define CRIMSONFS_MAX_FILE \
@@ -83,11 +87,16 @@ typedef struct {                 /* 64 bytes, one per slot in a dir block */
     char     name[56];
 } crimsonfs_dirent_t;
 
+typedef struct {
+    uint32_t creation_time;
+    uint32_t modification_time;
+} crimsonfs_timestamp_t;
+
 typedef struct {                 /* mounted-volume context (RAM only) */
     blkdev_t*           dev;
     crimsonfs_super_t   super;
     uint8_t*            bitmap;      /* RAM copy, 8 KiB */
-    crimsonfs_inode_t*  inodes;      /* RAM copy, 5120 bytes */
+    crimsonfs_inode_t*  inodes;      /* RAM copy, including trailing timestamp table */
 } crimsonfs_mount_t;
 
 typedef enum {
@@ -100,6 +109,10 @@ typedef enum {
 
 _Static_assert(sizeof(crimsonfs_super_t) < CRIMSONFS_BLOCK_SIZE, "superblock fits a block");
 _Static_assert(sizeof(crimsonfs_inode_t) == CRIMSONFS_INODE_BLOCK_SIZE, "inode size");
+_Static_assert(CRIMSONFS_TIMESTAMP_OFFSET +
+               CRIMSONFS_INODE_COUNT * sizeof(crimsonfs_timestamp_t) <=
+               CRIMSONFS_INODE_BLOCKS * CRIMSONFS_BLOCK_SIZE,
+               "timestamps fit in inode metadata blocks");
 _Static_assert(sizeof(crimsonfs_dirent_t) == 64, "dirent must be exactly 64 bytes");
 _Static_assert(CRIMSONFS_BLOCK_SIZE % sizeof(crimsonfs_dirent_t) == 0, "dirents tile a block");
 _Static_assert(sizeof(crimsonfs_mount_t) < CRIMSONFS_INODE_COUNT * CRIMSONFS_INODE_BLOCK_SIZE +
@@ -120,10 +133,12 @@ int crimsonfs_format(blkdev_t* dev);
  */
 vfs_node_t* crimsonfs_mount(blkdev_t* dev);
 
-/** Create an empty root-directory file; returns 0 on success. */
+/** Create an empty file in the supplied directory; returns 0 on success. */
 int crimsonfs_create(vfs_node_t* root, const char* name);
+/** Create an empty directory in the supplied directory; returns 0 on success. */
+int crimsonfs_mkdir(vfs_node_t* root, const char* name);
 
-/** Remove a root-directory file and release its allocated data blocks. */
+/** Remove an entry from the supplied directory and release its data blocks. */
 int crimsonfs_unlink(vfs_node_t* root, const char* name);
 
 #endif

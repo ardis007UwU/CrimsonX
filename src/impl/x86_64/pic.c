@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "x86_64/port.h"
+#include "kernel/irq.h"
 
 #define PORT_PIC1_COMMAND 0x20
 #define PORT_PIC1_DATA 0x21
@@ -29,6 +30,31 @@ void pic_eoi_master() {
 void pic_eoi_slave() {
     port_outb(PORT_PIC2_COMMAND, PIC_EOI);
     port_wait();
+    port_outb(PORT_PIC1_COMMAND, PIC_EOI);
+    port_wait();
+}
+
+void pic_set_irq_enabled(uint8_t irq, int enabled) {
+    if (irq >= 16) return;
+    irq_flags_t flags = irq_save();
+    uint8_t master_mask = port_inb(PORT_PIC1_DATA);
+    uint8_t slave_mask = port_inb(PORT_PIC2_DATA);
+
+    if (irq < 8) {
+        if (enabled) master_mask &= (uint8_t)~(1U << irq);
+        else master_mask |= (uint8_t)(1U << irq);
+    } else {
+        uint8_t bit = (uint8_t)(1U << (irq - 8));
+        if (enabled) {
+            slave_mask &= (uint8_t)~bit;
+            master_mask &= (uint8_t)~(1U << IRQ2_SLAVE);
+        } else {
+            slave_mask |= bit;
+        }
+    }
+    port_outb(PORT_PIC1_DATA, master_mask);
+    port_outb(PORT_PIC2_DATA, slave_mask);
+    irq_restore(flags);
 }
 
 void pic_remap() {

@@ -19,6 +19,7 @@ _Static_assert(__builtin_offsetof(task_t, kernel_stack_top) == 56,
 
 static task_t* task_list_head = NULL;
 static uint64_t next_pid = 1;
+static uint64_t foreground_pid = 0;
 
 /* Current task is non-static so syscall_entry.asm can reach the per-task
  * kernel stack. */
@@ -52,6 +53,12 @@ void process_init(void) {
     main_task->mmap_base = 0;
     main_task->mmap_next = 0;
     main_task->mappings = NULL;
+    main_task->cwd[0] = '/';
+    main_task->cwd[1] = '\0';
+    main_task->pending_signals = 0;
+    for (size_t i = 0; i <= KERNEL_SIGNAL_MAX; i++) {
+        main_task->signal_handlers[i] = 0;
+    }
     for (int i = 0; i < VFS_FD_MAX; i++) main_task->fds[i] = NULL;
 
     if (process_fd_defaults(main_task) != 0) {
@@ -73,6 +80,74 @@ task_t* process_current_task(void) {
     return current_task;
 }
 
+void process_set_foreground(uint64_t pid) {
+    uint64_t flags = irq_save();
+    foreground_pid = pid;
+    irq_restore(flags);
+}
+
+uint64_t process_get_foreground(void) {
+    uint64_t flags = irq_save();
+    uint64_t pid = foreground_pid;
+    irq_restore(flags);
+    return pid;
+}
+
+int process_send_signal(int64_t pid, uint32_t signal) {
+    if (pid <= 0 ||
+        (signal != 0 && signal != KERNEL_SIGINT &&
+         signal != KERNEL_SIGKILL && signal != KERNEL_SIGSEGV &&
+         signal != KERNEL_SIGTERM)) {
+        return -1;
+    }
+
+    uint64_t flags = irq_save();
+    task_t* task = task_list_head;
+    if (task) {
+        do {
+            if (task->id == (uint64_t)pid) {
+                if (task->state == TASK_STATE_DEAD) {
+                    irq_restore(flags);
+                    return -1;
+                }
+                if (signal != 0) {
+                    task->pending_signals |= UINT64_C(1) << signal;
+                    if (task->state == TASK_STATE_BLOCKED) {
+                        task->wake_ticks = 0;
+                        task->wait_channel = NULL;
+                        task->state = TASK_STATE_READY;
+                    }
+                }
+                irq_restore(flags);
+                return 0;
+            }
+            task = task->next;
+        } while (task && task != task_list_head);
+    }
+    irq_restore(flags);
+    return -1;
+}
+
+void process_handle_pending_signal(void) {
+    uint64_t flags = irq_save();
+    task_t* task = current_task;
+    if (!task || task->id == 0 || task->state == TASK_STATE_DEAD) {
+        irq_restore(flags);
+        return;
+    }
+
+    uint32_t signal = 0;
+    for (uint32_t candidate = 1; candidate <= KERNEL_SIGNAL_MAX; candidate++) {
+        if (task->pending_signals & (UINT64_C(1) << candidate)) {
+            signal = candidate;
+            task->pending_signals &= ~(UINT64_C(1) << candidate);
+            break;
+        }
+    }
+    irq_restore(flags);
+    if (signal != 0) process_kill_current((int32_t)(128 + signal));
+}
+
 void process_block(void) {
     uint64_t flags = irq_save();
     task_t* t = current_task;
@@ -86,6 +161,7 @@ void process_block(void) {
     t->state = TASK_STATE_BLOCKED;
     schedule();
     irq_restore(flags);
+    process_handle_pending_signal();
 }
 
 void process_block_on(const void* channel) {
@@ -104,6 +180,7 @@ void process_block_on(const void* channel) {
     t->state = TASK_STATE_BLOCKED;
     schedule();
     irq_restore(flags);
+    process_handle_pending_signal();
 }
 
 void process_wakeup(task_t* task) {
@@ -228,6 +305,18 @@ task_t* process_create(void (*entry_point)(void)) {
     new_task->mmap_base = 0;
     new_task->mmap_next = 0;
     new_task->mappings = NULL;
+    new_task->pending_signals = 0;
+    for (size_t i = 0; i <= KERNEL_SIGNAL_MAX; i++) {
+        new_task->signal_handlers[i] = 0;
+    }
+    const char* parent_cwd = current_task ? current_task->cwd : "/";
+    size_t cwd_index = 0;
+    while (cwd_index + 1 < sizeof(new_task->cwd) &&
+           parent_cwd[cwd_index] != '\0') {
+        new_task->cwd[cwd_index] = parent_cwd[cwd_index];
+        cwd_index++;
+    }
+    new_task->cwd[cwd_index] = '\0';
     for (int i = 0; i < VFS_FD_MAX; i++) new_task->fds[i] = NULL;
 
     if (!new_task->kernel_stack) {
@@ -309,6 +398,15 @@ int64_t process_fork(struct syscall_frame* frame) {
     child->mmap_base = parent->mmap_base;
     child->mmap_next = parent->mmap_next;
     child->mappings = NULL;
+    child->pending_signals = 0;
+    for (size_t i = 0; i <= KERNEL_SIGNAL_MAX; i++) {
+        child->signal_handlers[i] = parent->signal_handlers[i];
+    }
+    for (size_t i = 0; i < sizeof(child->cwd); i++) {
+        child->cwd[i] = parent->cwd[i];
+        if (parent->cwd[i] == '\0') break;
+    }
+    child->cwd[sizeof(child->cwd) - 1] = '\0';
     child->user_entry = parent->user_entry;
     child->user_stack = parent->user_stack;
     child->spawn_arg = NULL;
@@ -423,6 +521,7 @@ int64_t process_waitpid(int64_t pid, int32_t* status) {
         parent->state = TASK_STATE_BLOCKED;
         schedule();
         irq_restore(flags);
+        process_handle_pending_signal();
     }
 }
 
@@ -436,6 +535,7 @@ void process_sleep(uint32_t ms) {
     irq_restore(flags);
 
     schedule();
+    process_handle_pending_signal();
 }
 
 static void schedule_locked(void) {

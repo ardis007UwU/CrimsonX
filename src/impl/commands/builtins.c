@@ -18,6 +18,11 @@ extern const uint8_t hello_elf_end[];
 
 static int vmtest_failed;
 
+static const char* shell_cwd(void) {
+    task_t* task = process_current_task();
+    return task ? task->cwd : "/";
+}
+
 static const char* command_argument(const char* command, const char* name) {
     size_t i = 0;
     while (name[i] != '\0') {
@@ -141,6 +146,11 @@ static void cmd_mkfs(void) {
     }
 
     if (crimsonfs_mount(dev)) {
+        task_t* task = process_current_task();
+        if (task) {
+            task->cwd[0] = '/';
+            task->cwd[1] = '\0';
+        }
         print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
         print_str("mkfs: CrimsonFS volume created and mounted\n");
     } else {
@@ -157,7 +167,7 @@ static void cmd_ls(void) {
     }
 
     /* A fresh "/" handle starts the directory stream at offset 0. */
-    vfs_node_t* dir = vfs_open("/");
+    vfs_node_t* dir = vfs_open_at(".", shell_cwd());
     if (!dir) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("ls: mount broken\n");
@@ -192,7 +202,7 @@ static void cmd_ls(void) {
 }
 
 static void cmd_cat(const char* name) {
-    vfs_node_t* n = vfs_open(name);
+    vfs_node_t* n = vfs_open_at(name, shell_cwd());
     if (!n) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("cat: no such file: ");
@@ -232,7 +242,7 @@ static void cmd_rm(const char* name) {
         return;
     }
 
-    if (crimsonfs_unlink(vfs_get_root(), name) == 0) {
+    if (vfs_unlink_at(name, shell_cwd()) == 0) {
         print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
         print_str("rm: removed ");
         print_str((char*)name);
@@ -243,6 +253,47 @@ static void cmd_rm(const char* name) {
         print_str((char*)name);
         print_str("\n");
     }
+}
+
+static void cmd_mkdir(const char* path) {
+    if (!path || path[0] == '\0') {
+        print_str("Usage: mkdir <path>\n");
+        return;
+    }
+    if (vfs_mkdir_at(path, shell_cwd()) == 0) {
+        print_set_color(PRINT_COLOR_GREEN, PRINT_COLOR_BLACK);
+        print_str("mkdir: created ");
+        print_str((char*)path);
+        print_char('\n');
+    } else {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("mkdir: failed to create ");
+        print_str((char*)path);
+        print_char('\n');
+    }
+}
+
+static void cmd_cd(const char* path) {
+    task_t* task = process_current_task();
+    if (!task) return;
+    if (!path || path[0] == '\0') path = "/";
+    char new_cwd[VFS_PATH_MAX];
+    if (vfs_chdir(path, task->cwd, new_cwd, sizeof(new_cwd)) != 0) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("cd: not a directory: ");
+        print_str((char*)path);
+        print_char('\n');
+        return;
+    }
+    size_t i = 0;
+    while (i + 1 < sizeof(task->cwd) && new_cwd[i] != '\0') {
+        task->cwd[i] = new_cwd[i];
+        i++;
+    }
+    task->cwd[i] = '\0';
+    print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
+    print_str(task->cwd);
+    print_char('\n');
 }
 
 static void cmd_install(void) {
@@ -292,14 +343,17 @@ static void cmd_exec(const char* name) {
     }
 
     uint64_t pid = t->id;
+    process_set_foreground(pid);
     int32_t status = 0;
     if (process_waitpid((int64_t)pid, &status) < 0) {
+        process_set_foreground(0);
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("\nexec: wait failed for pid ");
         print_uint64_dec(pid);
         print_str("\n");
         return;
     }
+    process_set_foreground(0);
 
     print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
     print_str("\nexec: pid ");
@@ -317,6 +371,8 @@ void execute_command(char* cmd) {
     const char* cat_arg = command_argument(cmd, "cat");
     const char* rm_arg = command_argument(cmd, "rm");
     const char* exec_arg = command_argument(cmd, "exec");
+    const char* mkdir_arg = command_argument(cmd, "mkdir");
+    const char* cd_arg = command_argument(cmd, "cd");
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "HELP") == 0) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
@@ -334,6 +390,8 @@ void execute_command(char* cmd) {
         print_str("  ps      - List processes\n");
         print_str("\nstorage:\n");
         print_str("  ls      - List files on the mounted CrimsonFS\n");
+        print_str("  cd      - Change the current directory\n");
+        print_str("  mkdir   - mkdir <path>: create a directory\n");
         print_str("  cat     - cat <file>: dump a file's bytes\n");
         print_str("  rm      - rm <file>: remove a file from CrimsonFS\n");
         print_str("  mkfs    - Format disk 0 as CrimsonFS and mount it\n");
@@ -455,6 +513,15 @@ void execute_command(char* cmd) {
 
     } else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "LS") == 0) {
         cmd_ls();
+
+    } else if (mkdir_arg) {
+        cmd_mkdir(mkdir_arg);
+
+    } else if (cd_arg) {
+        cmd_cd(cd_arg);
+
+    } else if (strcmp(cmd, "cd") == 0 || strcmp(cmd, "CD") == 0) {
+        cmd_cd("/");
 
     } else if (cat_arg) {
         cmd_cat(cat_arg);

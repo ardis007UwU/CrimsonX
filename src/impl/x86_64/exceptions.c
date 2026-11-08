@@ -1,5 +1,6 @@
 #include "x86_64/exceptions.h"
 #include "print.h"
+#include "kernel/process.h"
 
 static char* exception_names[32] = {
     "#DE Divide Error",
@@ -40,6 +41,22 @@ static void print_field(char* label, uint64_t value) {
 void exception_handler(struct exception_frame* frame) {
     uint64_t cr2 = 0;
     asm volatile("mov %%cr2, %0" : "=r"(cr2));
+
+    if (frame && frame->vector == 14 && (frame->cs & 3) == 3) {
+        task_t* task = process_current_task();
+        print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_RED);
+        print_str("\n[user fault] page fault in PID ");
+        print_uint64_dec(task ? task->id : 0);
+        print_str(" at 0x");
+        print_uint64_hex(cr2);
+        print_str("; terminating with SIGSEGV\n");
+        print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
+        if (task) {
+            process_send_signal((int64_t)task->id, KERNEL_SIGSEGV);
+            process_handle_pending_signal();
+        }
+        for (;;) asm volatile("cli; hlt");
+    }
 
     print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_RED);
     print_str("\n*** KERNEL EXCEPTION: ");
