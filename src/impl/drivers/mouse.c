@@ -27,6 +27,8 @@ static volatile uint8_t packet[3];
 static volatile uint8_t packet_index;
 static volatile mouse_state_t current_state;
 static mouse_handler_t current_handler;
+static volatile uint16_t mouse_x = MOUSE_SCREEN_WIDTH / 2;
+static volatile uint16_t mouse_y = MOUSE_SCREEN_HEIGHT / 2;
 
 static int ps2_wait_input_empty(void) {
     for (uint32_t i = 0; i < PS2_WAIT_LIMIT; i++) {
@@ -81,14 +83,26 @@ static void mouse_irq_handler(void) {
     int16_t delta_y = packet[2];
     if (packet[1] & 0x80U) delta_x -= 256;
     if (packet[2] & 0x80U) delta_y -= 256;
+    int32_t next_x = (int32_t)mouse_x + delta_x;
+    int32_t next_y = (int32_t)mouse_y - delta_y;
+    if (next_x < 0) next_x = 0;
+    if (next_x >= MOUSE_SCREEN_WIDTH) next_x = MOUSE_SCREEN_WIDTH - 1;
+    if (next_y < 0) next_y = 0;
+    if (next_y >= MOUSE_SCREEN_HEIGHT) next_y = MOUSE_SCREEN_HEIGHT - 1;
+    mouse_x = (uint16_t)next_x;
+    mouse_y = (uint16_t)next_y;
     current_state.delta_x = delta_x;
     current_state.delta_y = delta_y;
     current_state.buttons = flags & 0x07U;
+    current_state.x = mouse_x;
+    current_state.y = mouse_y;
     if (current_handler) {
         mouse_state_t event = {
             .delta_x = current_state.delta_x,
             .delta_y = current_state.delta_y,
-            .buttons = current_state.buttons
+            .buttons = current_state.buttons,
+            .x = current_state.x,
+            .y = current_state.y
         };
         current_handler(&event);
     }
@@ -100,6 +114,10 @@ int mouse_init(void) {
     current_state.delta_x = 0;
     current_state.delta_y = 0;
     current_state.buttons = 0;
+    mouse_x = MOUSE_SCREEN_WIDTH / 2;
+    mouse_y = MOUSE_SCREEN_HEIGHT / 2;
+    current_state.x = mouse_x;
+    current_state.y = mouse_y;
     current_handler = NULL;
     idt_set_handler_mouse(mouse_irq_handler);
 
@@ -143,6 +161,29 @@ int mouse_get_state(mouse_state_t* state) {
     state->delta_x = current_state.delta_x;
     state->delta_y = current_state.delta_y;
     state->buttons = current_state.buttons;
+    state->x = current_state.x;
+    state->y = current_state.y;
     irq_restore(flags);
     return 0;
+}
+
+uint16_t mouse_get_x(void) {
+    irq_flags_t flags = irq_save();
+    uint16_t x = mouse_x;
+    irq_restore(flags);
+    return x;
+}
+
+uint16_t mouse_get_y(void) {
+    irq_flags_t flags = irq_save();
+    uint16_t y = mouse_y;
+    irq_restore(flags);
+    return y;
+}
+
+uint8_t mouse_get_buttons(void) {
+    irq_flags_t flags = irq_save();
+    uint8_t buttons = current_state.buttons;
+    irq_restore(flags);
+    return buttons;
 }

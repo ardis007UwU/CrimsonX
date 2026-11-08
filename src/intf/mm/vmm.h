@@ -58,7 +58,11 @@ void vmm_destroy_address_space(uint64_t cr3);
  */
 int vmm_map_page_in(uint64_t cr3, uint64_t vaddr, uint64_t paddr, uint64_t flags);
 
-/** Map one page into the kernel address space. */
+/**
+ * Map one aligned physical page into the kernel address space.
+ * The physical frame need not be managed by the PMM (for example, a PCI MMIO
+ * BAR). Use PAGE_NO_FREE for borrowed/MMIO frames so teardown never frees them.
+ */
 int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags);
 
 /** Remove one mapping and optionally free its physical frame. */

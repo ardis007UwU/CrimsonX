@@ -51,6 +51,20 @@ static void test_kernel_space(uint64_t kcr3) {
     CHECK(vmm_query(kcr3, UVA, 0, 0) != 0);
 }
 
+static void test_mmio_mapping(uint64_t kcr3) {
+    const uint64_t framebuffer = 0xE0000000ULL;
+    uint64_t paddr = 0;
+    uint64_t flags = 0;
+
+    CHECK(vmm_map_page(framebuffer, framebuffer,
+                       PAGE_WRITE | PAGE_NO_FREE) == 0);
+    CHECK(vmm_query(kcr3, framebuffer, &paddr, &flags) == 0);
+    CHECK(paddr == framebuffer);
+    CHECK(flags == (PAGE_PRESENT | PAGE_WRITE));
+    CHECK(vmm_unmap_page_in(kcr3, framebuffer, 1) == 0);
+    CHECK(vmm_query(kcr3, framebuffer, 0, 0) != 0);
+}
+
 static void test_basic_user_mapping(uint64_t kcr3) {
     long base = live_frames;
     uint64_t cr3 = vmm_create_address_space();
@@ -276,6 +290,7 @@ int main(void) {
     CHECK(vmm_current_cr3() == kcr3);
 
     test_kernel_space(kcr3);
+    test_mmio_mapping(kcr3);
     test_basic_user_mapping(kcr3);
     test_user_bit_on_every_level();
     test_rules(kcr3);

@@ -19,6 +19,17 @@ int main(void) {
     pmm_init(MEM);
     CHECK(pmm_get_free_block_count() == USABLE_BLOCKS);
 
+    /* A 1024x768x32-bit backbuffer needs 768 contiguous 4 KiB pages. */
+    uint64_t backbuffer = (uint64_t)pmm_alloc_contiguous(768);
+    CHECK(backbuffer >= 0x200000 && backbuffer % PMM_BLOCK_SIZE == 0);
+    CHECK(pmm_get_free_block_count() == USABLE_BLOCKS - 768);
+    if (backbuffer != 0) {
+        for (uint64_t i = 0; i < 768; i++) {
+            pmm_free_block((void*)(backbuffer + i * PMM_BLOCK_SIZE));
+        }
+    }
+    CHECK(pmm_get_free_block_count() == USABLE_BLOCKS);
+
     /* Basic contiguous allocation */
     uint64_t a = (uint64_t)pmm_alloc_contiguous(5);
     CHECK(a >= 0x200000 && a % PMM_BLOCK_SIZE == 0);
