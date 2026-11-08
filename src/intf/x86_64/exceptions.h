@@ -23,5 +23,5 @@ struct exception_frame {
 /* Entry addresses of the 32 CPU exception stubs, indexed by vector. */
 extern uint64_t isr_stub_table[32];
 
-/* Called from isr_common. Prints the fault and halts. */
+/** Handle a CPU exception, report its saved state, and halt. */
 void exception_handler(struct exception_frame* frame);

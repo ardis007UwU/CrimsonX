@@ -22,6 +22,7 @@ static int console_close(vfs_node_t* node) {
 
 static int console_write(vfs_node_t* node, const void* buf, size_t count) {
     (void)node;
+    if (count && !buf) return -1;
     const char* s = (const char*)buf;
     for (size_t i = 0; i < count; i++) {
         char c = s[i];
@@ -119,7 +120,7 @@ void vfs_init(void) {
 }
 
 vfs_node_t* vfs_open(const char* path) {
-    if (!vfs_root || !vfs_root->lookup) return NULL;
+    if (!path || !vfs_root || !vfs_root->lookup) return NULL;
 
     /* "/" (or "") resolves through the fs driver so fresh node state is
      * owned per-open; the fs special-cases the empty name for its root. */
@@ -128,11 +129,8 @@ vfs_node_t* vfs_open(const char* path) {
     size_t len = 0;
     while (p[len] != '\0' && p[len] != '/') len++;
 
-    if (len == 0) {
-        return vfs_root->lookup(vfs_root, "");
-    }
+    if (p[len] != '\0') return NULL;
 
-    /* Single-level name resolution (one path component). */
     char leaf[64];
     if (len >= sizeof(leaf)) return NULL;
     for (size_t i = 0; i < len; i++) leaf[i] = p[i];
@@ -140,26 +138,60 @@ vfs_node_t* vfs_open(const char* path) {
 
     vfs_node_t* found = vfs_root->lookup(vfs_root, leaf);
     if (!found) return NULL;
+    if (found->open && found->open(found) != 0) {
+        vfs_close(found);
+        return NULL;
+    }
     return found;
 }
 
 int vfs_close(vfs_node_t* node) {
     if (!node) return -1;
-    if (node->close) node->close(node);
-    kfree(node);
-    return 0;
+    int result = node->close ? node->close(node) : 0;
+    if (node != &console_node && node != &keyboard_node) kfree(node);
+    return result;
 }
 
 int vfs_file_read(vfs_file_t* file, void* buf, size_t count) {
-    if (!file || !file->node || !file->node->read) return -1;
+    if (!file || !file->node || !file->node->read ||
+        !(file->access_mode & VFS_ACCESS_READ) || (count && !buf) ||
+        count > 0x7fffffffU) return -1;
     int n = file->node->read(file->node, buf, count);
     if (n > 0) file->offset += (size_t)n;
     return n;
 }
 
 int vfs_file_write(vfs_file_t* file, const void* buf, size_t count) {
-    if (!file || !file->node || !file->node->write) return -1;
+    if (!file || !file->node || !file->node->write ||
+        !(file->access_mode & VFS_ACCESS_WRITE) || (count && !buf) ||
+        count > 0x7fffffffU) return -1;
     int n = file->node->write(file->node, buf, count);
     if (n > 0) file->offset += (size_t)n;
     return n;
+}
+
+int vfs_file_seek(vfs_file_t* file, int64_t offset, int whence) {
+    if (!file || !file->node || !file->node->seek) return -1;
+    uint64_t new_offset = 0;
+    if (file->node->seek(file->node, offset, whence, &new_offset) != 0 ||
+        new_offset > (uint64_t)(size_t)-1) return -1;
+    file->offset = (size_t)new_offset;
+    return 0;
+}
+
+int vfs_file_retain(vfs_file_t* file) {
+    if (!file || file->references == 0 || file->references == UINT32_MAX) return -1;
+    file->references++;
+    return 0;
+}
+
+int vfs_file_release(vfs_file_t* file) {
+    if (!file || file->references == 0) return -1;
+    file->references--;
+    if (file->references != 0) return 0;
+
+    int result = 0;
+    if (file->owns_node && file->node) result = vfs_close(file->node);
+    kfree(file);
+    return result;
 }

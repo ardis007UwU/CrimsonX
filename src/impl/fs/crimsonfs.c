@@ -3,8 +3,8 @@
  * block device layer.
  *
  * Invariants that keep the logic small:
- *   - Directory sizes are always whole blocks; entries append contiguously
- *     (no deletion, no holes), so `size / 512` blocks hold `size / 64` slots.
+ *   - Directory sizes are always whole blocks, so `size / 512` blocks hold
+ *     `size / 64` slots.
  *   - The allocation bitmap and inode table are cached in RAM at mount time
  *     and written back synchronously inside every mutating operation.
  *   - File content blocks are fetched with read-modify-write splicing.
@@ -32,11 +32,23 @@ static vfs_node_t* fs_root_node = NULL;
 /* ---------------- small blocks ---------------- */
 
 static int dev_read(uint32_t lba, uint32_t count, void* buf) {
+    if (!fs_mount || !buf || !fs_mount->dev->read_blocks ||
+        lba > fs_mount->super.total_blocks ||
+        count > fs_mount->super.total_blocks - lba) return -1;
     return fs_mount->dev->read_blocks(fs_mount->dev, lba, count, buf);
 }
 
 static int dev_write(uint32_t lba, uint32_t count, const void* buf) {
+    if (!fs_mount || !buf || !fs_mount->dev->write_blocks ||
+        lba > fs_mount->super.total_blocks ||
+        count > fs_mount->super.total_blocks - lba) return -1;
     return fs_mount->dev->write_blocks(fs_mount->dev, lba, count, buf);
+}
+
+static int data_lba_valid(uint32_t lba) {
+    return fs_mount && lba >= CRIMSONFS_DATA_LBA &&
+           lba < fs_mount->super.total_blocks &&
+           lba < CRIMSONFS_BITMAP_MAX_BLOCKS;
 }
 
 static void zero8(void* p, size_t n) {
@@ -92,10 +104,15 @@ static int32_t block_alloc(void) {
 }
 
 static void block_free(uint32_t lba_index) {
-    if (lba_index < CRIMSONFS_DATA_LBA) return;
+    if (!fs_mount || lba_index < CRIMSONFS_DATA_LBA ||
+        lba_index >= fs_mount->super.total_blocks ||
+        lba_index >= CRIMSONFS_BITMAP_MAX_BLOCKS) return;
     if (bitmap_test(lba_index)) {
         bitmap_clear(lba_index);
-        fs_mount->super.free_blocks++;
+        if (fs_mount->super.free_blocks <
+            fs_mount->super.total_blocks - CRIMSONFS_DATA_LBA) {
+            fs_mount->super.free_blocks++;
+        }
     }
 }
 
@@ -110,6 +127,7 @@ static crimsonfs_inode_t* inode_get(uint32_t ino) {
  * Holes (missing blocks) read as zeros. Returns bytes moved or -1 on I/O
  * failure before any byte was produced. */
 static int inode_pread(crimsonfs_inode_t* in, uint64_t offset, void* buf, size_t count) {
+    if (!in || (count && !buf) || in->size > CRIMSONFS_MAX_FILE) return -1;
     if (offset >= in->size) return 0;
     count = MIN_SIZE(count, (size_t)(in->size - offset));
 
@@ -130,6 +148,7 @@ static int inode_pread(crimsonfs_inode_t* in, uint64_t offset, void* buf, size_t
         } else if (in->indirect != 0) {
             uint32_t table[CRIMSONFS_INDIRECT_BLOCKS];
             size_t idx = bi - CRIMSONFS_DIRECT_BLOCKS;
+            if (!data_lba_valid(in->indirect)) return done ? (int)done : -1;
             if (dev_read(in->indirect, 1, table) != 0) {
                 return done ? (int)done : -1;
             }
@@ -139,6 +158,7 @@ static int inode_pread(crimsonfs_inode_t* in, uint64_t offset, void* buf, size_t
         if (bno == 0) {
             zero8(out + done, take);
         } else {
+            if (!data_lba_valid(bno)) return done ? (int)done : -1;
             if (dev_read(bno, 1, block) != 0) {
                 return done ? (int)done : -1;
             }
@@ -152,6 +172,10 @@ static int inode_pread(crimsonfs_inode_t* in, uint64_t offset, void* buf, size_t
 /* Write `count` bytes at `offset`, extending the file and allocating blocks
  * as needed. RAM inode is updated; caller flushes metadata. */
 static int inode_pwrite(crimsonfs_inode_t* in, uint64_t offset, const void* buf, size_t count) {
+    if (!in || (count && !buf) || in->size > CRIMSONFS_MAX_FILE ||
+        offset > CRIMSONFS_MAX_FILE) return -1;
+    if (offset == CRIMSONFS_MAX_FILE) return 0;
+    if (count > CRIMSONFS_MAX_FILE - offset) count = CRIMSONFS_MAX_FILE - (size_t)offset;
     uint8_t block[CRIMSONFS_BLOCK_SIZE];
     size_t done = 0;
 
@@ -182,6 +206,7 @@ static int inode_pwrite(crimsonfs_inode_t* in, uint64_t offset, const void* buf,
             }
 
             uint32_t indirect_table[CRIMSONFS_INDIRECT_BLOCKS];
+            if (!data_lba_valid(in->indirect)) break;
             if (dev_read(in->indirect, 1, indirect_table) != 0) break;
             bno = indirect_table[idx];
             if (bno == 0) {
@@ -216,7 +241,7 @@ static int inode_pwrite(crimsonfs_inode_t* in, uint64_t offset, const void* buf,
                 }
             }
             zero8(block, sizeof(block));
-        } else if (dev_read(bno, 1, block) != 0) {
+        } else if (!data_lba_valid(bno) || dev_read(bno, 1, block) != 0) {
             break;
         }
 
@@ -248,6 +273,7 @@ static int dir_scan(uint32_t dir_ino, dirent_cb_t cb, void* ctx) {
 
     for (size_t bi = 0; bi < blocks && bi < CRIMSONFS_DIRECT_BLOCKS; bi++) {
         if (in->direct[bi] == 0) continue;
+        if (!data_lba_valid(in->direct[bi])) return CS_SCAN_ERROR;
         if (dev_read(in->direct[bi], 1, block) != 0) return CS_SCAN_ERROR;
         for (size_t s = 0; s < per_block; s++) {
             crimsonfs_dirent_t* ent =
@@ -262,8 +288,11 @@ static int dir_scan(uint32_t dir_ino, dirent_cb_t cb, void* ctx) {
 }
 
 static int find_cb(crimsonfs_dirent_t* ent, void* raw) {
-    struct { const char* name; uint32_t found; }* ctx = raw;
-    if (strcmp(ent->name, ctx->name) == 0) {
+    struct { const char* name; size_t len; uint32_t found; }* ctx = raw;
+    if (ent->name_len == ctx->len && ent->name_len <= sizeof(ent->name)) {
+        size_t i = 0;
+        while (i < ctx->len && ent->name[i] == ctx->name[i]) i++;
+        if (i != ctx->len) return CS_SCAN_CONTINUE;
         ctx->found = ent->inode;
         return CS_SCAN_STOP;
     }
@@ -271,7 +300,9 @@ static int find_cb(crimsonfs_dirent_t* ent, void* raw) {
 }
 
 static int dir_find(uint32_t dir_ino, const char* name, uint32_t* out_ino) {
-    struct { const char* name; uint32_t found; } ctx = { name, 0 };
+    if (!name) return -1;
+    size_t len = strlen(name);
+    struct { const char* name; size_t len; uint32_t found; } ctx = { name, len, 0 };
     int r = dir_scan(dir_ino, find_cb, &ctx);
     if (r == CS_SCAN_ERROR) return -1;
     if (out_ino) *out_ino = ctx.found;
@@ -283,12 +314,13 @@ static int dir_find(uint32_t dir_ino, const char* name, uint32_t* out_ino) {
 static int cs_node_close(vfs_node_t* node);
 static int cs_node_read(vfs_node_t* node, void* buf, size_t count);
 static int cs_node_write(vfs_node_t* node, const void* buf, size_t count);
+static int cs_node_seek(vfs_node_t* node, int64_t offset, int whence, uint64_t* new_offset);
 static vfs_node_t* cs_lookup(vfs_node_t* dir, const char* name);
 
 /* Build a fresh node for `ino`; `name` is heap-copied (freed on close). */
 static vfs_node_t* cs_node_for(uint32_t ino, const char* name) {
     crimsonfs_inode_t* in = inode_get(ino);
-    if (!in) return NULL;
+    if (!in || !name) return NULL;
 
     size_t len = strlen(name);
     if (len > 60) return NULL;
@@ -319,10 +351,12 @@ static vfs_node_t* cs_node_for(uint32_t ino, const char* name) {
     node->close = cs_node_close;
     node->read = cs_node_read;
     node->write = cs_node_write;
+    node->seek = cs_node_seek;
     return node;
 }
 
 static int cs_node_close(vfs_node_t* node) {
+    if (!node) return -1;
     if (node->data) {
         kfree(node->data);
         node->data = 0;
@@ -335,6 +369,7 @@ static int cs_node_close(vfs_node_t* node) {
 }
 
 static int cs_node_read(vfs_node_t* node, void* buf, size_t count) {
+    if (!node || !node->data || (count && !buf)) return -1;
     cs_file_t* f = (cs_file_t*)node->data;
     crimsonfs_inode_t* in = inode_get(f->ino);
     if (!in) return -1;
@@ -347,22 +382,50 @@ static int cs_node_read(vfs_node_t* node, void* buf, size_t count) {
 }
 
 static int cs_node_write(vfs_node_t* node, const void* buf, size_t count) {
+    if (!node || !node->data || (count && !buf)) return -1;
     cs_file_t* f = (cs_file_t*)node->data;
     crimsonfs_inode_t* in = inode_get(f->ino);
     if (!in || in->type == CRIMFS_TYPE_DIR) return -1;
     int n = inode_pwrite(in, f->pos, buf, count);
     if (n > 0) {
+        if (bitmap_flush() != 0 || inodes_flush() != 0 || super_flush() != 0) return -1;
         f->pos += (uint64_t)n;
         node->size = in->size;
-        inodes_flush();
-        bitmap_flush();
-        super_flush();
     }
     return n;
 }
 
+static int cs_node_seek(vfs_node_t* node, int64_t offset, int whence, uint64_t* new_offset) {
+    if (!node || !node->data || !new_offset) return -1;
+    cs_file_t* file = (cs_file_t*)node->data;
+    crimsonfs_inode_t* inode = inode_get(file->ino);
+    if (!inode || inode->type == CRIMFS_TYPE_DIR ||
+        inode->size > CRIMSONFS_MAX_FILE) return -1;
+
+    uint64_t base;
+    if (whence == VFS_SEEK_SET) base = 0;
+    else if (whence == VFS_SEEK_CUR) base = file->pos;
+    else if (whence == VFS_SEEK_END) base = inode->size;
+    else return -1;
+
+    uint64_t result;
+    if (offset < 0) {
+        uint64_t magnitude = (uint64_t)(-(offset + 1)) + 1;
+        if (magnitude > base) return -1;
+        result = base - magnitude;
+    } else {
+        if ((uint64_t)offset > CRIMSONFS_MAX_FILE - base) return -1;
+        result = base + (uint64_t)offset;
+    }
+
+    if (result > CRIMSONFS_MAX_FILE) return -1;
+    file->pos = result;
+    *new_offset = result;
+    return 0;
+}
+
 static vfs_node_t* cs_lookup(vfs_node_t* dir, const char* name) {
-    if (!fs_mount || dir->type != VFS_TYPE_DIR) return NULL;
+    if (!fs_mount || !dir || !dir->data || !name || dir->type != VFS_TYPE_DIR) return NULL;
     size_t len = strlen(name);
     if (len > 55) return NULL;
 
@@ -398,7 +461,7 @@ int crimsonfs_unmount(void) {
 }
 
 int crimsonfs_format(blkdev_t* dev) {
-    if (!dev) return -1;
+    if (!dev || !dev->write_blocks) return -1;
 
     uint8_t block[CRIMSONFS_BLOCK_SIZE];
     uint32_t total = (dev->block_count < CRIMSONFS_BITMAP_MAX_BLOCKS)
@@ -455,7 +518,7 @@ int crimsonfs_format(blkdev_t* dev) {
 }
 
 vfs_node_t* crimsonfs_mount(blkdev_t* dev) {
-    if (!dev || fs_mount) return NULL;
+    if (!dev || !dev->read_blocks || !dev->write_blocks || fs_mount) return NULL;
 
     uint8_t block[CRIMSONFS_BLOCK_SIZE];
     if (dev->read_blocks(dev, 0, 1, block) != 0) return NULL;
@@ -465,8 +528,16 @@ vfs_node_t* crimsonfs_mount(blkdev_t* dev) {
         sb->magic[6] != '0' || sb->magic[7] != '\0') return NULL;
     if (sb->version != CRIMSONFS_VERSION) return NULL;
     if (sb->block_size != CRIMSONFS_BLOCK_SIZE) return NULL;
-    if (sb->total_blocks > dev->block_count) return NULL;
-    if (sb->total_blocks <= sb->data_lba) return NULL;
+    if (sb->total_blocks > dev->block_count || sb->total_blocks > CRIMSONFS_BITMAP_MAX_BLOCKS) return NULL;
+    if (sb->bitmap_lba != CRIMSONFS_BITMAP_LBA ||
+        sb->bitmap_blocks != CRIMSONFS_BITMAP_BLOCKS ||
+        sb->inode_count != CRIMSONFS_INODE_COUNT ||
+        sb->inode_lba != CRIMSONFS_INODE_LBA ||
+        sb->inode_blocks != CRIMSONFS_INODE_BLOCKS ||
+        sb->data_lba != CRIMSONFS_DATA_LBA ||
+        sb->total_blocks <= sb->data_lba ||
+        sb->free_blocks > sb->total_blocks - sb->data_lba ||
+        sb->free_inodes >= CRIMSONFS_INODE_COUNT) return NULL;
     if (sb->root_inode == 0 || sb->root_inode >= CRIMSONFS_INODE_COUNT) return NULL;
 
     crimsonfs_mount_t* m = (crimsonfs_mount_t*)kmalloc(sizeof(crimsonfs_mount_t));
@@ -511,7 +582,7 @@ fail:
 }
 
 int crimsonfs_create(vfs_node_t* root, const char* name) {
-    if (!fs_mount || !root || root->type != VFS_TYPE_DIR) return -1;
+    if (!fs_mount || !root || !root->data || !name || root->type != VFS_TYPE_DIR) return -1;
     size_t name_len = strlen(name);
     if (name_len == 0 || name_len > 55) return -1;
 
@@ -520,7 +591,8 @@ int crimsonfs_create(vfs_node_t* root, const char* name) {
     if (!din) return -1;
 
     uint32_t existing = 0;
-    if (dir_find(d->ino, name, &existing) > 0) return -1;   /* duplicate */
+    int lookup = dir_find(d->ino, name, &existing);
+    if (lookup != 0) return -1;
 
     /* 1. take a free inode */
     uint32_t new_ino = 0;
@@ -537,12 +609,15 @@ int crimsonfs_create(vfs_node_t* root, const char* name) {
     /* build the updated dirent block first so a write failure never leaves
      * a size bump without its dirent */
     uint8_t blk[CRIMSONFS_BLOCK_SIZE];
+    int allocated_dir_block = 0;
     if (din->direct[bi] == 0) {
         int32_t nb = block_alloc();
         if (nb < 0) return -1;   /* volume full */
         zero8(blk, sizeof(blk));
         din->direct[bi] = (uint32_t)nb;
+        allocated_dir_block = 1;
     } else {
+        if (!data_lba_valid(din->direct[bi])) return -1;
         if (dev_read(din->direct[bi], 1, blk) != 0) return -1;
     }
 
@@ -554,7 +629,7 @@ int crimsonfs_create(vfs_node_t* root, const char* name) {
     for (size_t i = 0; i < name_len; i++) slot->name[i] = name[i];
 
     if (dev_write(din->direct[bi], 1, blk) != 0) {
-        if (add_pos == 0) {   /* we allocated this directory block */
+        if (allocated_dir_block) {
             block_free(din->direct[bi]);
             din->direct[bi] = 0;
             bitmap_flush();
@@ -577,7 +652,10 @@ int crimsonfs_create(vfs_node_t* root, const char* name) {
 }
 
 int crimsonfs_unlink(vfs_node_t* root, const char* name) {
-    if (!fs_mount || !root || root->type != VFS_TYPE_DIR || !name || name[0] == '\0') return -1;
+    if (!fs_mount || !root || !root->data || root->type != VFS_TYPE_DIR ||
+        !name || name[0] == '\0') return -1;
+    size_t name_len = strlen(name);
+    if (name_len > 55) return -1;
 
     cs_file_t* d = (cs_file_t*)root->data;
     crimsonfs_inode_t* din = inode_get(d->ino);
@@ -591,12 +669,16 @@ int crimsonfs_unlink(vfs_node_t* root, const char* name) {
 
     for (size_t bi = 0; bi < CRIMSONFS_DIRECT_BLOCKS; bi++) {
         if (din->direct[bi] == 0) continue;
+        if (!data_lba_valid(din->direct[bi])) return -1;
         if (dev_read(din->direct[bi], 1, dir_block) != 0) return -1;
 
         for (size_t s = 0; s < per_block; s++) {
             crimsonfs_dirent_t* ent = (crimsonfs_dirent_t*)(dir_block + s * sizeof(crimsonfs_dirent_t));
-            if (ent->inode == 0) continue;
-            if (strcmp(ent->name, name) == 0) {
+            if (ent->inode == 0 || ent->name_len != name_len ||
+                ent->name_len > sizeof(ent->name)) continue;
+            size_t i = 0;
+            while (i < name_len && ent->name[i] == name[i]) i++;
+            if (i == name_len) {
                 target_ino = ent->inode;
                 dir_lba = din->direct[bi];
                 slot_index = s;
@@ -611,35 +693,61 @@ int crimsonfs_unlink(vfs_node_t* root, const char* name) {
     crimsonfs_inode_t* target = inode_get(target_ino);
     if (!target || target->type == CRIMFS_TYPE_FREE || target->type == CRIMFS_TYPE_DIR) return -1;
 
-    for (size_t i = 0; i < CRIMSONFS_DIRECT_BLOCKS; i++) {
-        if (target->direct[i] != 0) {
-            block_free(target->direct[i]);
-            target->direct[i] = 0;
-        }
-    }
-
+    uint32_t indirect_table[CRIMSONFS_INDIRECT_BLOCKS];
+    zero8(indirect_table, sizeof(indirect_table));
     if (target->indirect != 0) {
-        uint32_t indirect_table[CRIMSONFS_INDIRECT_BLOCKS];
-        if (dev_read(target->indirect, 1, indirect_table) != 0) return -1;
-        for (size_t i = 0; i < CRIMSONFS_INDIRECT_BLOCKS; i++) {
-            if (indirect_table[i] != 0) block_free(indirect_table[i]);
-        }
-        block_free(target->indirect);
-        target->indirect = 0;
+        if (target->indirect < CRIMSONFS_DATA_LBA ||
+            target->indirect >= fs_mount->super.total_blocks ||
+            dev_read(target->indirect, 1, indirect_table) != 0) return -1;
+    }
+    for (size_t i = 0; i < CRIMSONFS_DIRECT_BLOCKS; i++) {
+        if (target->direct[i] != 0 &&
+            (target->direct[i] < CRIMSONFS_DATA_LBA ||
+             target->direct[i] >= fs_mount->super.total_blocks)) return -1;
+    }
+    for (size_t i = 0; i < CRIMSONFS_INDIRECT_BLOCKS; i++) {
+        if (indirect_table[i] != 0 &&
+            (indirect_table[i] < CRIMSONFS_DATA_LBA ||
+             indirect_table[i] >= fs_mount->super.total_blocks)) return -1;
     }
 
     if (dev_read(dir_lba, 1, dir_block) != 0) return -1;
-    crimsonfs_dirent_t* entry = (crimsonfs_dirent_t*)(dir_block + slot_index * sizeof(crimsonfs_dirent_t));
+    crimsonfs_dirent_t* entry =
+        (crimsonfs_dirent_t*)(dir_block + slot_index * sizeof(crimsonfs_dirent_t));
+    if (entry->inode != target_ino || entry->name_len != name_len) return -1;
+    for (size_t i = 0; i < name_len; i++) {
+        if (entry->name[i] != name[i]) return -1;
+    }
+    crimsonfs_dirent_t saved_entry = *entry;
     zero8(entry, sizeof(*entry));
     if (dev_write(dir_lba, 1, dir_block) != 0) return -1;
 
+    crimsonfs_inode_t saved_inode = *target;
     zero8(target, sizeof(*target));
     target->type = CRIMFS_TYPE_FREE;
     target->nlink = 0;
     target->size = 0;
     fs_mount->super.free_inodes++;
+    if (inodes_flush() != 0) {
+        *target = saved_inode;
+        fs_mount->super.free_inodes--;
+        zero8(entry, sizeof(*entry));
+        *entry = saved_entry;
+        dev_write(dir_lba, 1, dir_block);
+        return -1;
+    }
 
-    if (inodes_flush() != 0 || bitmap_flush() != 0 || super_flush() != 0) return -1;
+    for (size_t i = 0; i < CRIMSONFS_DIRECT_BLOCKS; i++) {
+        if (saved_inode.direct[i] != 0) block_free(saved_inode.direct[i]);
+    }
+    if (saved_inode.indirect != 0) {
+        for (size_t i = 0; i < CRIMSONFS_INDIRECT_BLOCKS; i++) {
+            if (indirect_table[i] != 0) block_free(indirect_table[i]);
+        }
+        block_free(saved_inode.indirect);
+    }
+
+    if (bitmap_flush() != 0 || super_flush() != 0) return -1;
     root->size = din->size;
     return 0;
 }

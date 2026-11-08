@@ -223,6 +223,61 @@ uint64_t vmm_create_address_space(void) {
     return (uint64_t)pml4;
 }
 
+uint64_t vmm_clone_address_space(uint64_t source_cr3) {
+    if (!source_cr3 || source_cr3 == kernel_cr3) return 0;
+    uint64_t clone_cr3 = vmm_create_address_space();
+    if (!clone_cr3) return 0;
+
+    uint64_t* source_l4 = (uint64_t*)PAGE_FRAME(source_cr3);
+    for (uint64_t i = PML4_INDEX(USER_SPACE_START);
+         i < PML4_INDEX(USER_SPACE_END); i++) {
+        if (!(source_l4[i] & PAGE_PRESENT)) continue;
+        if (source_l4[i] & PTE_HUGE) goto fail;
+        uint64_t* source_l3 = (uint64_t*)PAGE_FRAME(source_l4[i]);
+
+        for (uint64_t j = 0; j < ENTRIES_PER_TABLE; j++) {
+            if (!(source_l3[j] & PAGE_PRESENT)) continue;
+            if (source_l3[j] & PTE_HUGE) goto fail;
+            uint64_t* source_l2 = (uint64_t*)PAGE_FRAME(source_l3[j]);
+
+            for (uint64_t k = 0; k < ENTRIES_PER_TABLE; k++) {
+                if (!(source_l2[k] & PAGE_PRESENT)) continue;
+                if (source_l2[k] & PTE_HUGE) goto fail;
+                uint64_t* source_l1 = (uint64_t*)PAGE_FRAME(source_l2[k]);
+
+                for (uint64_t m = 0; m < ENTRIES_PER_TABLE; m++) {
+                    uint64_t entry = source_l1[m];
+                    if (!(entry & PAGE_PRESENT) ||
+                        !((source_l4[i] & source_l3[j] & source_l2[k] & entry) & PAGE_USER)) {
+                        continue;
+                    }
+
+                    uint64_t vaddr = (i << 39) | (j << 30) | (k << 21) | (m << 12);
+                    uint64_t* frame = (uint64_t*)pmm_alloc_block();
+                    if (!frame) goto fail;
+
+                    const uint8_t* source = (const uint8_t*)PAGE_FRAME(entry);
+                    uint8_t* destination = (uint8_t*)frame;
+                    for (size_t byte = 0; byte < PAGE_SIZE; byte++) {
+                        destination[byte] = source[byte];
+                    }
+
+                    uint64_t flags = (entry & PTE_FLAG_MASK) & ~PAGE_NO_FREE;
+                    if (vmm_map_page_in(clone_cr3, vaddr, (uint64_t)frame, flags) != 0) {
+                        pmm_free_block(frame);
+                        goto fail;
+                    }
+                }
+            }
+        }
+    }
+    return clone_cr3;
+
+fail:
+    vmm_destroy_address_space(clone_cr3);
+    return 0;
+}
+
 void vmm_destroy_address_space(uint64_t cr3) {
     if (!cr3 || cr3 == kernel_cr3) return;
 

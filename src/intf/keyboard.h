@@ -21,17 +21,18 @@ struct KeyboardEvent {
 
 typedef void (*keyboard_handler_t)(struct KeyboardEvent);
 
+/** Initialize the keyboard IRQ handler and input ring buffer. */
 void keyboard_init(void);
+/** Install an optional keyboard event callback. */
 void keyboard_set_handler(keyboard_handler_t handler);
+/** Translate a PS/2 scan code to ASCII, or return zero if not printable. */
 char to_ascii(uint16_t code);
 
-/* ASCII ring buffer shared by every consumer (fed from the IRQ handler):
- * readable via SYS_READ and blockable for user processes. */
+/** @return Number of bytes currently buffered for readers. */
 size_t keyboard_ring_available(void);
-/* Non-blocking pop of up to `count` chars; returns bytes actually read. */
+/** Remove up to count bytes without blocking; returns bytes read or -1. */
 int keyboard_pop_bytes(char* buf, size_t count);
-/* Blocking fetch used by SYS_READ: parks the current task until at least
- * one char is available, then returns up to `count`. Expects IF off. */
+/** Block until input is available, then return up to count bytes or -1. */
 int keyboard_read_blocking(char* buf, size_t count);
 
 #endif

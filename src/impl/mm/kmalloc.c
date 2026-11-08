@@ -15,6 +15,7 @@ void kmalloc_init(void) {
 
 void* kmalloc(size_t size) {
     if (size == 0) return NULL;
+    if (size > SIZE_MAX - sizeof(struct Header)) return NULL;
 
     size_t total_size = size + sizeof(struct Header);
     struct Header* curr = head;
@@ -29,6 +30,7 @@ void* kmalloc(size_t size) {
         curr = curr->next;
     }
 
+    if (total_size > SIZE_MAX - (PMM_BLOCK_SIZE - 1)) return NULL;
     size_t blocks_needed = (total_size + PMM_BLOCK_SIZE - 1) / PMM_BLOCK_SIZE;
     // The header, the payload and every extra block must be physically
     // consecutive; separate pmm_alloc_block() calls only guarantee that until

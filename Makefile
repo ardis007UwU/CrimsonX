@@ -29,8 +29,8 @@ $(ASM_OBJECTS): build/%.o : src/impl/%.asm
 	@mkdir -p $(dir $@)
 	nasm -f elf64 $(NASM_EXTRA) $< -o $@
 
-# Host-side unit tests for the memory managers (needs only a normal gcc).
-# Runs vmm.c / pmm.c as ordinary programs under AddressSanitizer + UBSan.
+# Host-side memory, filesystem, and process-support tests (normal gcc only).
+# Runs the host-compatible components under AddressSanitizer + UBSan.
 # BUILD_HOST is overridable: `make test-host BUILD_HOST=/tmp/...` when build/ is
 # owned by the docker user.
 BUILD_HOST ?= build/host
@@ -46,10 +46,16 @@ test-host:
 	gcc -g -Wall -Wextra -fsanitize=address,undefined -I src/intf \
 		tests/host/crimsonfs_test.c src/impl/fs/crimsonfs.c src/impl/fs/vfs.c src/impl/kernel/blkdev.c src/impl/kernel/string.c \
 		-o $(BUILD_HOST)/crimsonfs_test
+	gcc -g -Wall -Wextra -fsanitize=address,undefined -I src/intf \
+		tests/host/pipe_test.c src/impl/fs/pipe.c -o $(BUILD_HOST)/pipe_test
+	gcc -g -Wall -Wextra -fsanitize=address,undefined -I src/intf \
+		tests/host/mmap_test.c src/impl/kernel/mmap.c -o $(BUILD_HOST)/mmap_test
 	$(BUILD_HOST)/vmm_test
 	$(BUILD_HOST)/pmm_test
 	$(BUILD_HOST)/elf_test
 	$(BUILD_HOST)/crimsonfs_test
+	$(BUILD_HOST)/pipe_test
+	$(BUILD_HOST)/mmap_test
 
 .PHONY: build-x86_64
 build-x86_64: $(C_OBJECTS) $(ASM_OBJECTS)

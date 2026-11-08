@@ -2,7 +2,7 @@
 ;
 ; Runs in ring 3 at 0x8000000000 (PML4 slot 1: any USER_SPACE_START page).
 ; Syscall ABI (syscall.h):
-;   0 WRITE  rdi = buf, rsi = len     (legacy impression ABI)
+;   0 WRITE_LEGACY  rdi = buf, rsi = len
 ;   2 EXIT   rdi = status
 ;   3 READ   rdi = fd, rsi = buf, rdx = count   (POSIX style)
 
@@ -11,10 +11,10 @@ global _start
 
 section .text
 _start:
-    ; SYS_WRITE "hello\n"
+    ; SYS_WRITE_LEGACY "hello\n"
     lea rdi, [rel msg]
     mov rsi, 6
-    xor rax, rax            ; SYS_WRITE
+    xor rax, rax            ; SYS_WRITE_LEGACY
     syscall
 
     ; SYS_READ 4 bytes from stdin (blocks in the kernel)
@@ -29,7 +29,7 @@ _start:
     ; echo back exactly what arrived
     lea rdi, [rel rbuf]
     mov rsi, rax
-    xor rax, rax            ; SYS_WRITE
+    xor rax, rax            ; SYS_WRITE_LEGACY
     syscall
 
 .exit_ok:

@@ -227,6 +227,48 @@ static void test_capacity_clamps(void) {
     crimsonfs_unmount();
 }
 
+static void test_vfs_file_seek_and_access_modes(void) {
+    CHECK(crimsonfs_format(&fake_dev) == 0);
+    vfs_node_t* root = crimsonfs_mount(&fake_dev);
+    CHECK(root != NULL);
+    if (!root) return;
+    CHECK(crimsonfs_create(root, "seek") == 0);
+
+    vfs_file_t* file = calloc(1, sizeof(*file));
+    CHECK(file != NULL);
+    if (file) {
+        file->node = vfs_open("/seek");
+        file->owns_node = 1;
+        file->access_mode = VFS_ACCESS_READ | VFS_ACCESS_WRITE;
+        file->references = 1;
+        CHECK(file->node != NULL);
+    }
+    if (file && file->node) {
+        const char payload[] = "abcdefgh";
+        char readback[sizeof(payload)] = {0};
+        CHECK(vfs_file_write(file, payload, sizeof(payload) - 1) == (int)sizeof(payload) - 1);
+        CHECK(file->offset == sizeof(payload) - 1);
+        CHECK(vfs_file_seek(file, -4, 2) == 0);
+        CHECK(file->offset == 4);
+        CHECK(vfs_file_read(file, readback, 4) == 4);
+        CHECK(memcmp(readback, "efgh", 4) == 0);
+        CHECK(vfs_file_seek(file, 0, 0) == 0);
+
+        file->access_mode = VFS_ACCESS_READ;
+        CHECK(vfs_file_write(file, payload, 1) == -1);
+        CHECK(vfs_file_read(file, readback, 1) == 1);
+        CHECK(vfs_file_retain(file) == 0);
+        CHECK(vfs_file_release(file) == 0);
+        CHECK(vfs_file_release(file) == 0);
+    } else if (file) {
+        free(file);
+    }
+
+    CHECK(vfs_open(NULL) == NULL);
+    CHECK(vfs_open("/seek/nested") == NULL);
+    CHECK(crimsonfs_unmount() == 0);
+}
+
 static void test_unlink_removes_file_and_frees_blocks(void) {
     CHECK(crimsonfs_format(&fake_dev) == 0);
     vfs_node_t* root = crimsonfs_mount(&fake_dev);
@@ -236,15 +278,24 @@ static void test_unlink_removes_file_and_frees_blocks(void) {
     CHECK(crimsonfs_create(root, "drop") == 0);
     vfs_node_t* n = vfs_open("/drop");
     CHECK(n != NULL);
+    uint32_t free_before_write = ((crimsonfs_super_t*)backing[0])->free_blocks;
     if (n) {
-        uint8_t payload[2048];
-        memset(payload, 0x7F, sizeof(payload));
-        CHECK(n->write(n, payload, sizeof(payload)) == (int)sizeof(payload));
+        uint8_t* payload = malloc(CRIMSONFS_MAX_FILE);
+        CHECK(payload != NULL);
+        if (!payload) {
+            vfs_close(n);
+            crimsonfs_unmount();
+            return;
+        }
+        memset(payload, 0x7F, CRIMSONFS_MAX_FILE);
+        CHECK(n->write(n, payload, CRIMSONFS_MAX_FILE) == (int)CRIMSONFS_MAX_FILE);
         vfs_close(n);
+        free(payload);
     }
 
     CHECK(crimsonfs_unlink(root, "drop") == 0);
     CHECK(vfs_open("/drop") == NULL);
+    CHECK(((crimsonfs_super_t*)backing[0])->free_blocks == free_before_write);
     crimsonfs_unmount();
 }
 
@@ -257,6 +308,7 @@ int main(void) {
     test_create_write_read();
     test_persistence_across_mounts();
     test_capacity_clamps();
+    test_vfs_file_seek_and_access_modes();
     test_unlink_removes_file_and_frees_blocks();
 
     printf("%s: %d checks, %d failures\n", "crimsonfs_test", checks, failures);

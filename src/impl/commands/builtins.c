@@ -18,6 +18,33 @@ extern const uint8_t hello_elf_end[];
 
 static int vmtest_failed;
 
+static const char* command_argument(const char* command, const char* name) {
+    size_t i = 0;
+    while (name[i] != '\0') {
+        if (command[i] == '\0' || command[i] != name[i]) return NULL;
+        i++;
+    }
+    if (command[i] != ' ') return NULL;
+    while (command[i] == ' ') i++;
+    return command + i;
+}
+
+static int parse_milliseconds(const char* text, uint32_t* result) {
+    if (!text || !result || text[0] < '0' || text[0] > '9') return -1;
+    uint32_t value = 0;
+    size_t i = 0;
+    while (text[i] >= '0' && text[i] <= '9') {
+        uint32_t digit = (uint32_t)(text[i] - '0');
+        if (value > (UINT32_MAX - digit) / 10) return -1;
+        value = value * 10 + digit;
+        i++;
+    }
+    while (text[i] == ' ') i++;
+    if (text[i] != '\0' || value == 0) return -1;
+    *result = value;
+    return 0;
+}
+
 static void vmtest_check(char* name, int ok) {
     print_set_color(ok ? PRINT_COLOR_GREEN : PRINT_COLOR_RED, PRINT_COLOR_BLACK);
     print_str(ok ? "  PASS  " : "  FAIL  ");
@@ -232,13 +259,10 @@ static void cmd_install(void) {
         return;
     }
 
-    /* recreate to make the demo idempotent: remove by remounting? crimsonfs
-     * has no delete; reuse the file if present */
-    if (crimsonfs_create(root, "hello") != 0) {
-        /* already exists: reuse and overwrite in place */
-    }
-
     vfs_node_t* f = vfs_open("/hello");
+    if (!f) {
+        if (crimsonfs_create(root, "hello") == 0) f = vfs_open("/hello");
+    }
     if (!f) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("install: cannot reopen /hello\n");
@@ -266,14 +290,33 @@ static void cmd_exec(const char* name) {
         print_str("\nexec: spawn failed\n");
         return;
     }
+
+    uint64_t pid = t->id;
+    int32_t status = 0;
+    if (process_waitpid((int64_t)pid, &status) < 0) {
+        print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
+        print_str("\nexec: wait failed for pid ");
+        print_uint64_dec(pid);
+        print_str("\n");
+        return;
+    }
+
     print_set_color(PRINT_COLOR_CYAN, PRINT_COLOR_BLACK);
     print_str("\nexec: pid ");
-    print_uint64_dec(t->id);
-    print_str(" queued\n");
+    print_uint64_dec(pid);
+    print_str(" exited with status ");
+    print_uint64_dec((uint32_t)status);
+    print_str("\n");
 }
 
 void execute_command(char* cmd) {
-    if (cmd[0] == '\0') return;
+    if (!cmd || cmd[0] == '\0') return;
+
+    const char* sleep_arg = command_argument(cmd, "sleep");
+    const char* echo_arg = command_argument(cmd, "echo");
+    const char* cat_arg = command_argument(cmd, "cat");
+    const char* rm_arg = command_argument(cmd, "rm");
+    const char* exec_arg = command_argument(cmd, "exec");
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "HELP") == 0) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
@@ -295,7 +338,7 @@ void execute_command(char* cmd) {
         print_str("  rm      - rm <file>: remove a file from CrimsonFS\n");
         print_str("  mkfs    - Format disk 0 as CrimsonFS and mount it\n");
         print_str("  install - Write the embedded hello.elf program to disk\n");
-        print_str("  exec    - exec <path>: load ELF from CrimsonFS, spawn ring-3 task\n");
+        print_str("  exec    - exec <path>: run a CrimsonFS ELF and wait for its status\n");
 
     } else if (strcmp(cmd, "uptime") == 0 || strcmp(cmd, "UPTIME") == 0) {
         uint64_t uptime_sec = pit_get_uptime_sec();
@@ -312,15 +355,9 @@ void execute_command(char* cmd) {
         print_set_color(PRINT_COLOR_RED, PRINT_COLOR_BLACK);
         print_str("Usage: sleep <milliseconds>\n");
 
-    } else if (cmd[0] == 's' && cmd[1] == 'l' && cmd[2] == 'e' && cmd[3] == 'e' && cmd[4] == 'p' && cmd[5] == ' ') {
+    } else if (sleep_arg) {
         uint32_t ms = 0;
-        int i = 6;
-        while (cmd[i] >= '0' && cmd[i] <= '9') {
-            ms = ms * 10 + (cmd[i] - '0');
-            i++;
-        }
-
-        if (ms > 0) {
+        if (parse_milliseconds(sleep_arg, &ms) == 0) {
             print_set_color(PRINT_COLOR_YELLOW, PRINT_COLOR_BLACK);
             print_str("Sleeping for ");
             print_uint64_dec(ms);
@@ -408,9 +445,9 @@ void execute_command(char* cmd) {
     } else if (strcmp(cmd, "crash de") == 0) {
         asm volatile("xor %%edx, %%edx\n\tmov $1, %%eax\n\txor %%ecx, %%ecx\n\tdiv %%ecx" : : : "eax", "ecx", "edx");
 
-    } else if (cmd[0] == 'e' && cmd[1] == 'c' && cmd[2] == 'h' && cmd[3] == 'o' && cmd[4] == ' ') {
+    } else if (echo_arg) {
         print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLACK);
-        print_str(cmd + 5);
+        print_str((char*)echo_arg);
         print_str("\n");
 
     } else if (strcmp(cmd, "mkfs") == 0) {
@@ -419,18 +456,18 @@ void execute_command(char* cmd) {
     } else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "LS") == 0) {
         cmd_ls();
 
-    } else if (cmd[0] == 'c' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == ' ') {
-        cmd_cat(cmd + 4);
+    } else if (cat_arg) {
+        cmd_cat(cat_arg);
 
-    } else if (cmd[0] == 'r' && cmd[1] == 'm' && cmd[2] == ' ') {
-        cmd_rm(cmd + 3);
+    } else if (rm_arg) {
+        cmd_rm(rm_arg);
 
     } else if (strcmp(cmd, "install") == 0) {
         cmd_install();
 
-    } else if (cmd[0] == 'e' && cmd[1] == 'x' && cmd[2] == 'e' && cmd[3] == 'c' && cmd[4] == ' ') {
+    } else if (exec_arg) {
         /* trim filepath spaces */
-        char* path = cmd + 5;
+        char* path = (char*)exec_arg;
         size_t len = strlen(path);
         while (len > 0 && (path[len - 1] == ' ')) {
             len--;

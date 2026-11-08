@@ -2,6 +2,7 @@
 #include "mm/vmm.h"
 #include "string.h"
 #include "mm/kmalloc.h"
+#include "kernel/mmap.h"
 
 /* ---- on-image structures (the format's little-endian fields map 1:1) ---- */
 
@@ -104,13 +105,76 @@ static int copy_to_user_pages(uint64_t cr3, uint64_t virt, uint64_t flags,
     return 0;
 }
 
-int elf64_load(const void* raw, size_t size, uint64_t* out_cr3,
-               uint64_t* out_entry, uint64_t* out_stack_top) {
+static int push_stack_string(uint64_t cr3, uint64_t stack_lo, uint64_t* stack,
+                             const char* text, uint64_t* user_pointer) {
+    if (!text || !stack || !user_pointer) return -1;
+    size_t length = 0;
+    while (length < ELF64_MAX_ARG_LENGTH && text[length] != '\0') length++;
+    if (length == ELF64_MAX_ARG_LENGTH) return -1;
+    length++;
+    if (*stack < stack_lo || length > *stack - stack_lo) return -1;
+
+    *stack -= length;
+    if (copy_to_user_pages(cr3, *stack, PAGE_USER | PAGE_WRITE,
+                           (const uint8_t*)text, 0, length) != 0) return -1;
+    *user_pointer = *stack;
+    return 0;
+}
+
+static int build_initial_stack(uint64_t cr3, uint64_t stack_top,
+                               const char* const argv[], size_t argc,
+                               const char* const envp[], size_t envc,
+                               uint64_t* out_stack) {
+    if (argc > ELF64_MAX_ARGC || envc > ELF64_MAX_ENVC ||
+        (argc && !argv) || (envc && !envp)) return -1;
+
+    uint64_t argv_user[ELF64_MAX_ARGC];
+    uint64_t envp_user[ELF64_MAX_ENVC];
+    uint64_t stack = stack_top;
+    uint64_t stack_lo = stack_top - ELF_STACK_PAGES * PAGE_SIZE;
+
+    for (size_t i = envc; i > 0; i--) {
+        if (push_stack_string(cr3, stack_lo, &stack, envp[i - 1],
+                              &envp_user[i - 1]) != 0) return -1;
+    }
+    for (size_t i = argc; i > 0; i--) {
+        if (push_stack_string(cr3, stack_lo, &stack, argv[i - 1],
+                              &argv_user[i - 1]) != 0) return -1;
+    }
+
+    size_t word_count = 1 + argc + 1 + envc + 1;
+    size_t table_size = word_count * sizeof(uint64_t);
+    if (stack < stack_lo || table_size > stack - stack_lo) return -1;
+    uint64_t table_start = (stack - table_size) & ~0xFULL;
+    if (table_start < stack_lo) return -1;
+
+    uint64_t table[1 + ELF64_MAX_ARGC + 1 + ELF64_MAX_ENVC + 1];
+    size_t at = 0;
+    table[at++] = argc;
+    for (size_t i = 0; i < argc; i++) table[at++] = argv_user[i];
+    table[at++] = 0;
+    for (size_t i = 0; i < envc; i++) table[at++] = envp_user[i];
+    table[at++] = 0;
+
+    if (copy_to_user_pages(cr3, table_start, PAGE_USER | PAGE_WRITE,
+                           (const uint8_t*)table, 0, table_size) != 0) return -1;
+    *out_stack = table_start;
+    return 0;
+}
+
+int elf64_load_args(const void* raw, size_t size,
+                    const char* const argv[], size_t argc,
+                    const char* const envp[], size_t envc,
+                    uint64_t* out_cr3, uint64_t* out_entry,
+                    uint64_t* out_stack_top, uint64_t* out_heap_start) {
     const uint8_t* img = (const uint8_t*)raw;
     elf64_ehdr_t ehdr;
     elf64_phdr_t* phdrs = NULL;
 
-    if (size < sizeof(elf64_ehdr_t)) return -1;
+    if (!img || !out_cr3 || !out_entry || !out_stack_top ||
+        argc > ELF64_MAX_ARGC || envc > ELF64_MAX_ENVC ||
+        (argc && !argv) || (envc && !envp) ||
+        !out_heap_start || size < sizeof(elf64_ehdr_t)) return -1;
 
     if (img[0] != ELF_MAGIC0 || img[1] != ELF_MAGIC1 ||
         img[2] != ELF_MAGIC2 || img[3] != ELF_MAGIC3) return -1;
@@ -133,6 +197,7 @@ int elf64_load(const void* raw, size_t size, uint64_t* out_cr3,
         return -1;
     }
 
+    uint64_t highest_segment_end = USER_SPACE_START;
     /* Pre-flight: validate every PT_LOAD before mapping anything. */
     for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
         elf64_phdr_t* p = &phdrs[i];
@@ -148,7 +213,9 @@ int elf64_load(const void* raw, size_t size, uint64_t* out_cr3,
         if (lo < USER_SPACE_START) { kfree(phdrs); return -1; }
         uint64_t hi = (p->p_vaddr + p->p_memsz + PAGE_SIZE - 1) & ~0xFFFULL;
         if (hi > USER_SPACE_END || hi < p->p_vaddr || hi < lo) { kfree(phdrs); return -1; }
+        if (hi > highest_segment_end) highest_segment_end = hi;
     }
+    if (highest_segment_end > VM_MMAP_BASE) { kfree(phdrs); return -1; }
 
     uint64_t cr3 = vmm_create_address_space();
     if (!cr3) { kfree(phdrs); return -1; }
@@ -189,16 +256,27 @@ int elf64_load(const void* raw, size_t size, uint64_t* out_cr3,
         goto fail;
     }
 
+    uint64_t initial_stack;
+    if (build_initial_stack(cr3, stack_top, argv, argc, envp, envc,
+                            &initial_stack) != 0) goto fail;
+    if (vmm_query(cr3, ehdr.e_entry, NULL, NULL) != 0) goto fail;
+
     kfree(phdrs);
     *out_cr3 = cr3;
     *out_entry = ehdr.e_entry;
-    /* Leave 64 bytes of headroom so the initial stack is 16-byte aligned
-     * relative to the ABI's required RSP % 16 == 0 at entry. */
-    *out_stack_top = stack_top - 64;
+    *out_stack_top = initial_stack;
+    *out_heap_start = highest_segment_end;
     return 0;
 
 fail:
     kfree(phdrs);
     vmm_destroy_address_space(cr3);
     return -1;
+}
+
+int elf64_load(const void* raw, size_t size, uint64_t* out_cr3,
+               uint64_t* out_entry, uint64_t* out_stack_top) {
+    uint64_t heap_start = 0;
+    return elf64_load_args(raw, size, NULL, 0, NULL, 0,
+                           out_cr3, out_entry, out_stack_top, &heap_start);
 }

@@ -4,7 +4,7 @@
 static const size_t NUM_COLS = 80;
 static const size_t NUM_ROWS = 25;
 
-/* Serial mirror (gives qemu/headless runs a debug console). */
+/* Serial mirror for QEMU and headless console output. */
 #define SERIAL_COM1 0x3F8
 static int serial_ready_flag = 0;
 

@@ -37,6 +37,18 @@ static void fill(uint8_t* dst, uint8_t byte, size_t n) {
 
 static void wipe(void* p, size_t n) { fill((uint8_t*)p, 0, n); }
 
+static int user_string_equals(uint64_t cr3, uint64_t address, const char* expected) {
+    size_t i = 0;
+    for (;;) {
+        uint64_t physical = 0;
+        if (vmm_query(cr3, address + i, &physical, 0) != 0) return 0;
+        char actual = *(const char*)(uintptr_t)physical;
+        if (actual != expected[i]) return 0;
+        if (actual == '\0') return 1;
+        i++;
+    }
+}
+
 static int failures = 0;
 static int checks = 0;
 
@@ -130,12 +142,25 @@ static void test_two_segments(void) {
     put_phdr(img, 0, 1 /*PT_LOAD*/, 5/*R|X*/, HDROFF, IMG_BASE, TEXTSZ, TEXTSZ + 0x20);
     put_phdr(img, 1, 1 /*PT_LOAD*/, 6/*R|W*/, HDROFF + TEXTSZ, IMG_BASE + 0x2000, DATASZ, DATASZ + 0x40);
 
-    uint64_t cr3 = 0, e = 0, st = 0;
-    CHECK(elf64_load(img, sizeof(img), &cr3, &e, &st) == 0);
+    uint64_t cr3 = 0, e = 0, st = 0, heap = 0;
+    const char* argv[] = {"hello", "world"};
+    const char* envp[] = {"MODE=test"};
+    CHECK(elf64_load_args(img, sizeof(img), argv, 2, envp, 1,
+                          &cr3, &e, &st, &heap) == 0);
     if (cr3) {
         CHECK(e == entry);
-        CHECK(st == USER_STACK_TOP - 64);
+        CHECK(heap == IMG_BASE + 0x3000);
+        CHECK(st == USER_STACK_TOP - 80);
         CHECK((st & 0xF) == 0);
+        uint64_t physical = 0;
+        CHECK(vmm_query(cr3, st, &physical, 0) == 0);
+        uint64_t* initial = (uint64_t*)(uintptr_t)physical;
+        CHECK(initial[0] == 2);
+        CHECK(user_string_equals(cr3, initial[1], "hello"));
+        CHECK(user_string_equals(cr3, initial[2], "world"));
+        CHECK(initial[3] == 0);
+        CHECK(user_string_equals(cr3, initial[4], "MODE=test"));
+        CHECK(initial[5] == 0);
 
         /* text bytes landed, bss tail is zeroed */
         uint64_t paddr = 0;

@@ -168,6 +168,49 @@ static void test_spanning_tables(void) {
     CHECK(live_frames == base);
 }
 
+static void test_clone_address_space(void) {
+    long base = live_frames;
+    uint64_t source = vmm_create_address_space();
+    CHECK(source != 0);
+    CHECK(vmm_map_user_alloc(source, UVA, 2 * PAGE_SIZE,
+                             PAGE_USER | PAGE_WRITE) == 0);
+    uint64_t source_pa = 0, source_second_pa = 0;
+    CHECK(vmm_query(source, UVA, &source_pa, 0) == 0);
+    CHECK(vmm_query(source, UVA + PAGE_SIZE, &source_second_pa, 0) == 0);
+    ((uint8_t*)(uintptr_t)source_pa)[17] = 0x5A;
+    ((uint8_t*)(uintptr_t)source_second_pa)[31] = 0xA5;
+
+    uint64_t clone = vmm_clone_address_space(source);
+    CHECK(clone != 0 && clone != source);
+    if (clone) {
+        uint64_t clone_pa = 0, second_pa = 0;
+        CHECK(vmm_query(clone, UVA, &clone_pa, 0) == 0);
+        CHECK(vmm_query(clone, UVA + PAGE_SIZE, &second_pa, 0) == 0);
+        CHECK((clone_pa & ~0xFFFULL) != (source_pa & ~0xFFFULL));
+        CHECK(((uint8_t*)(uintptr_t)clone_pa)[17] == 0x5A);
+        CHECK(((uint8_t*)(uintptr_t)second_pa)[31] == 0xA5);
+        ((uint8_t*)(uintptr_t)clone_pa)[17] = 0xCC;
+        CHECK(((uint8_t*)(uintptr_t)source_pa)[17] == 0x5A);
+        vmm_destroy_address_space(clone);
+    }
+
+    vmm_destroy_address_space(source);
+    CHECK(live_frames == base);
+
+    long baseline = live_frames;
+    source = vmm_create_address_space();
+    CHECK(source != 0);
+    CHECK(vmm_map_user_alloc(source, UVA, PAGE_SIZE,
+                             PAGE_USER | PAGE_WRITE) == 0);
+    base = live_frames;
+    budget = 1;
+    CHECK(vmm_clone_address_space(source) == 0);
+    budget = -1;
+    CHECK(live_frames == base);
+    vmm_destroy_address_space(source);
+    CHECK(live_frames == baseline);
+}
+
 /* Fail the PMM after N allocations for many N: every attempt must either fully
  * succeed or leave nothing mapped, and destroy must never leak. */
 static void test_failure_injection(void) {
@@ -237,6 +280,7 @@ int main(void) {
     test_user_bit_on_every_level();
     test_rules(kcr3);
     test_spanning_tables();
+    test_clone_address_space();
     test_failure_injection();
     test_destroy_active(kcr3);
 

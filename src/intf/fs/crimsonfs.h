@@ -10,9 +10,8 @@
  *                 C r i m s o n F S
  *       The native filesystem of CrimsonX
  *
- * A deliberately small volume format (~130 LOC of on-disk structures) that
- * still scales: a superblock, a fixed bitmap covering block allocation,
- * a flat inode table and per-inode block lists.
+ * A small volume format with a superblock, fixed allocation bitmap, flat inode
+ * table, direct block pointers, and one single-indirect block table.
  *
  * On-disk layout (blocks are 512 bytes == one LBA):
  *
@@ -23,10 +22,9 @@
  *   LBA ...     inode table (CrimsonFS_INODE_COUNT * 80 bytes)
  *   LBA ...     data blocks (allocation bitmap from here forward)
  *
- * Inodes are flat records with 16 direct block pointers (max file 8 KiB) and
- * a reserved indirect-pointer slot for future growth. Directories are just
- * inodes whose content blocks are arrays of crimsonfs_dirent_t. Inode 1 is
- * the root of the volume. No hierarchy yet: paths are single-level.
+ * Inodes support 16 direct and 128 indirect data blocks. Directories use
+ * direct blocks containing arrays of crimsonfs_dirent_t. Inode 1 is the root;
+ * paths are single-level.
  */
 
 #define CRIMSONFS_MAGIC        "CRIMFS0"
@@ -73,7 +71,7 @@ typedef struct {                 /* 80 bytes */
     uint16_t reserved;
     uint32_t size;
     uint32_t direct[CRIMSONFS_DIRECT_BLOCKS];
-    uint32_t indirect;           /* reserved for a future indirection level */
+    uint32_t indirect;           /* LBA of an array of 128 data-block LBAs */
     uint32_t unused;
 } crimsonfs_inode_t;             /* inode 0 is never used; root is 1 */
 
@@ -107,22 +105,25 @@ _Static_assert(CRIMSONFS_BLOCK_SIZE % sizeof(crimsonfs_dirent_t) == 0, "dirents 
 _Static_assert(sizeof(crimsonfs_mount_t) < CRIMSONFS_INODE_COUNT * CRIMSONFS_INODE_BLOCK_SIZE +
                CRIMSONFS_BITMAP_BLOCKS * CRIMSONFS_BLOCK_SIZE, "RAM caches fit volume size");
 
+/** Initialize the single-volume mount state. */
 void crimsonfs_init(void);
 
-/* Detach the mounted volume (frees RAM caches) or -1 if none. */
+/** Unmount the volume and free its RAM caches; returns -1 if not mounted. */
 int crimsonfs_unmount(void);
 
-/* Wipe the device and lay down an empty volume (root dir exists, is empty). */
+/** Format a device with an empty CrimsonFS volume and root directory. */
 int crimsonfs_format(blkdev_t* dev);
 
-/* Probe + mount. Returns the fresh root directory node (already handed to
- * the VFS on success) or NULL when the volume is invalid/busy. */
+/**
+ * Validate and mount a volume.
+ * @return Fresh root directory node, installed in the VFS, or NULL on failure.
+ */
 vfs_node_t* crimsonfs_mount(blkdev_t* dev);
 
-/* Create an empty file named `name` inside `root`. 0 on success. */
+/** Create an empty root-directory file; returns 0 on success. */
 int crimsonfs_create(vfs_node_t* root, const char* name);
 
-/* Remove the named file from `root` and free all associated blocks. */
+/** Remove a root-directory file and release its allocated data blocks. */
 int crimsonfs_unlink(vfs_node_t* root, const char* name);
 
 #endif

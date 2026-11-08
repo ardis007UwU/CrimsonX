@@ -31,45 +31,43 @@
 #define USER_SPACE_END   0x0000800000000000ULL   /* end of lower canonical half */
 #define USER_STACK_TOP   0x00007FFFFFFFF000ULL   /* page-aligned, grows down */
 
+/** Initialize kernel page tables and activate the kernel address space. */
 void vmm_init(void);
 
-/* Physical address of the kernel's PML4 (what CR3 holds for kernel tasks). */
+/** @return Physical address of the kernel PML4. */
 uint64_t vmm_kernel_cr3(void);
+/** @return Physical address of the currently tracked CR3. */
 uint64_t vmm_current_cr3(void);
 
-/* Load a new CR3 (no-op if it is already active). */
+/** Load cr3 as the active address space; ignored for zero or current CR3. */
 void vmm_switch(uint64_t cr3);
 
-/* New address space with the kernel mapping shared and an empty user half.
- * Returns the PML4 physical address, or 0 if out of memory. */
+/** Create a user address space sharing supervisor mappings; returns zero on failure. */
 uint64_t vmm_create_address_space(void);
+/** Deep-copy every user mapping into a new address space; returns zero on failure. */
+uint64_t vmm_clone_address_space(uint64_t source_cr3);
 
-/* Free all user mappings (and the frames they own) plus the table pages.
- * Switches back to the kernel address space first if it is the active one. */
+/** Destroy a user address space and return owned page frames to the allocator. */
 void vmm_destroy_address_space(uint64_t cr3);
 
-/*
- * Map one 4 KiB page into the address space `cr3`. Returns 0 on success, -1 if
- * rejected. Rejected: unaligned addresses, an address that is already mapped,
- * and anything that would mix kernel and user space:
- *   - user-range vaddr requires PAGE_USER and a non-kernel cr3
- *   - kernel-range vaddr forbids PAGE_USER and requires the kernel cr3
- * Intermediate page-table levels get the U bit as needed (x86 checks U/S at
- * every level).
+/**
+ * Map one aligned physical page into cr3 with the requested permissions.
+ * User virtual addresses require PAGE_USER and a non-kernel address space;
+ * kernel mappings must remain supervisor-only.
+ * @return 0 on success, or -1 for invalid, occupied, or out-of-range mappings.
  */
 int vmm_map_page_in(uint64_t cr3, uint64_t vaddr, uint64_t paddr, uint64_t flags);
 
-/* Kernel address space shorthand (used by vmm_init). */
+/** Map one page into the kernel address space. */
 int vmm_map_page(uint64_t vaddr, uint64_t paddr, uint64_t flags);
 
-/* Remove one mapping; optionally return its frame to the PMM. */
+/** Remove one mapping and optionally free its physical frame. */
 int vmm_unmap_page_in(uint64_t cr3, uint64_t vaddr, int free_frame);
 
-/* Allocate zeroed frames from the PMM and map `size` bytes at `vaddr`
- * (user space only). All-or-nothing: on failure nothing stays mapped. */
+/** Map zeroed user pages for size bytes; rolls back all pages on failure. */
 int vmm_map_user_alloc(uint64_t cr3, uint64_t vaddr, size_t size, uint64_t flags);
 
-/*
+/**
  * Walk the tables for `vaddr`. Returns 0 if mapped, -1 otherwise. *flags gets
  * the EFFECTIVE permissions: PAGE_PRESENT, plus PAGE_WRITE/PAGE_USER only if
  * every level grants them. *paddr (optional) gets the physical address

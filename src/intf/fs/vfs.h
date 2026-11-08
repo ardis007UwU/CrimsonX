@@ -15,10 +15,15 @@
  * vfs_file_t is the per-task "open instance": a node plus its private file
  * cursor. task_t holds a table of these; FD 0 = stdin, 1 = stdout, 2 = stderr.
  */
-#define VFS_FD_MAX    16
+#define VFS_FD_MAX    32
 #define VFS_FD_STDIN  0
 #define VFS_FD_STDOUT 1
 #define VFS_FD_STDERR 2
+#define VFS_ACCESS_READ  1
+#define VFS_ACCESS_WRITE 2
+#define VFS_SEEK_SET 0
+#define VFS_SEEK_CUR 1
+#define VFS_SEEK_END 2
 
 #define VFS_TYPE_UNKNOWN 0
 #define VFS_TYPE_FILE    1
@@ -32,46 +37,84 @@ struct vfs_node {
     uint32_t type;
     size_t size;          /* file size in bytes; channels report last op size */
     void* data;           /* fs/impl-private context, freed by close() */
-    /* Directory lookup (dir nodes): resolve `name` inside `dir`. Returns a
-     * fresh open node (fs-owned copy, freed via close()) or NULL. */
+    /** Resolve a child name to a fresh node owned by the caller. */
     vfs_node_t* (*lookup)(vfs_node_t* dir, const char* name);
+    /** Remove a child entry from this directory. */
     int (*unlink)(vfs_node_t* dir, const char* name);
+    /** Open per-node resources; return zero on success. */
     int (*open)(vfs_node_t* node);
+    /** Release per-node resources before the node is freed. */
     int (*close)(vfs_node_t* node);
-    /* Byte-stream I/O; files keep their cursor inside node->data.
-     * Return the number of bytes moved (>= 0) or -1 on error. */
+    /** Read up to count bytes, returning bytes moved or -1 on error. */
     int (*read)(vfs_node_t* node, void* buf, size_t count);
+    /** Write up to count bytes, returning bytes moved or -1 on error. */
     int (*write)(vfs_node_t* node, const void* buf, size_t count);
+    /** Set the node cursor; whence values are VFS_SEEK_* constants. */
+    int (*seek)(vfs_node_t* node, int64_t offset, int whence, uint64_t* new_offset);
 };
 
 typedef struct {
     vfs_node_t* node;
     size_t offset;
-    int owns_node;   /* free node via close when the descriptor dies */
+    int owns_node;   /**< Free node via close when the descriptor is released. */
+    uint8_t access_mode;
+    uint32_t references;
 } vfs_file_t;
 
+/** Initialize VFS state before mounting a filesystem. */
 void vfs_init(void);
 
-/* Open `path` relative to the root. Returns a fresh node copy (caller frees
- * with vfs_close(node)) or NULL. */
+/**
+ * Open a root-relative path.
+ * @param path NUL-terminated path; only the root and one-level names are supported.
+ * @return Fresh open node, owned by the caller, or NULL on failure.
+ */
 vfs_node_t* vfs_open(const char* path);
 
-/* fs-provided way to close the node (vfs_close frees) */
+/**
+ * Close and release a node returned by vfs_open().
+ * @param node Node to close.
+ * @return 0 on success, -1 for an invalid node.
+ */
 int vfs_close(vfs_node_t* node);
 
-/* Built-in channels for stdin/stdout/stderr defaults. */
+/** @return The shared console output channel. */
 vfs_node_t* vfs_console_channel(void);
+/** @return The shared keyboard input channel. */
 vfs_node_t* vfs_keyboard_channel(void);
 
-/* Install the root directory produced by a filesystem driver. */
+/** Install the mounted root directory node. */
 void vfs_set_root(vfs_node_t* root);
+/** @return The mounted root directory, or NULL if none is mounted. */
 vfs_node_t* vfs_get_root(void);
 
-/* Remove a single file or directory entry relative to the mounted root. */
+/**
+ * Remove a root-relative entry.
+ * @param path One-level root-relative path.
+ * @return Filesystem result, or -1 for invalid paths/unsupported operations.
+ */
 int vfs_unlink(const char* path);
 
-/* Consume up to `count` bytes from an open file descriptor object. */
+/**
+ * Read up to count bytes from an open file.
+ * @return Bytes read, zero at end of stream, or -1 on error.
+ */
 int vfs_file_read(vfs_file_t* file, void* buf, size_t count);
+/**
+ * Write up to count bytes to an open file.
+ * @return Bytes written, or -1 on error.
+ */
 int vfs_file_write(vfs_file_t* file, const void* buf, size_t count);
+/**
+ * Set a file's cursor relative to SEEK_SET (0), SEEK_CUR (1), or SEEK_END (2).
+ * @return 0 on success, -1 for unsupported seeks or invalid offsets.
+ */
+int vfs_file_seek(vfs_file_t* file, int64_t offset, int whence);
+/** Add one descriptor reference to a shared open-file instance. */
+int vfs_file_retain(vfs_file_t* file);
+/** Release one reference and close/free the open-file instance at zero. */
+int vfs_file_release(vfs_file_t* file);
+/** Create a blocking in-memory pipe and return its read/write endpoint nodes. */
+int vfs_pipe_create(vfs_node_t** read_node, vfs_node_t** write_node);
 
 #endif

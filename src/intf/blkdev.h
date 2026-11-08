@@ -27,11 +27,14 @@ struct blkdev {
     struct blkdev* next;     /* registry linkage */
 };
 
-/* Register a device with the kernel (appends to the list). */
+/** Register a block device with the kernel device list. */
 void blkdev_register(blkdev_t* dev);
 
+/** @return Number of registered block devices. */
 uint32_t blkdev_count(void);
+/** @return Device at index, or NULL when index is out of range. */
 blkdev_t* blkdev_get(uint32_t index);
+/** @return Device with the matching name, or NULL if none exists. */
 blkdev_t* blkdev_get_by_name(const char* name);
 
 #endif

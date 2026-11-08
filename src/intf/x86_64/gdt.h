@@ -3,8 +3,8 @@
 #include <stdint.h>
 
 #define GDT_RING_0 0
-#define GDT_RING_1 1 // legacy
-#define GDT_RING_2 2 // legacy
+#define GDT_RING_1 1
+#define GDT_RING_2 2
 #define GDT_RING_3 3
 
 #define GDT_SELECTOR_INDEX 3
@@ -31,8 +31,11 @@
 /* IST slot used by the double fault handler (1-based, as written in the IDT). */
 #define GDT_IST_DOUBLE_FAULT 1
 
+/** Install the kernel/user segment descriptors and task-state segment. */
 void gdt_init(void);
 
-/* Stack the CPU switches to when an interrupt or exception arrives from ring 3.
- * Must be updated on every context switch to a user task. */
+/**
+ * Set the ring-0 stack used for interrupts from ring 3.
+ * @param rsp0 Top of the current task's kernel stack.
+ */
 void gdt_set_kernel_stack(uint64_t rsp0);

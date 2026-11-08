@@ -26,6 +26,7 @@ bits 64
 
 global syscall_entry
 global exec_drop
+global fork_child_start
 
 syscall_entry:
     ; IF is already cleared (SFMASK). Park user RSP and RAX in kernel memory
@@ -61,6 +62,7 @@ syscall_entry:
     mov rdi, rsp                            ; arg0 = struct syscall_frame*
     call syscall_handler
 
+syscall_return:
     ; RAX contains the return value from syscall_handler
     pop r15
     pop r14
@@ -83,6 +85,17 @@ syscall_entry:
     pop rsp                     ; restore user RSP
 
     o64 sysret
+
+; A fork child starts with RDI pointing at its copied syscall frame.
+fork_child_start:
+    mov ax, 0x1B
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov rsp, rdi
+    xor eax, eax
+    jmp syscall_return
 
 ; void exec_drop(uint64_t old_cr3, uint64_t new_cr3,
 ;                void* entry, void* ustack, void* kstack_top)
@@ -119,6 +132,11 @@ exec_drop:
     pop rcx
     pop rdx
 
+    mov ax, 0x1B
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
     push qword 0x1B                     ; user SS
     push rcx                            ; user RSP
     push qword 0x202                    ; RFLAGS (IF enabled)

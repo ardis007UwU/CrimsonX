@@ -5,6 +5,9 @@
 #include <stddef.h>
 #include "fs/vfs.h"
 
+struct syscall_frame;
+struct vm_mapping;
+
 typedef enum {
     TASK_STATE_READY,
     TASK_STATE_RUNNING,
@@ -26,6 +29,15 @@ typedef struct task {
      * NOTE: switch.asm hard-codes offset 8 for `rsp`, so keep id/rsp first.
      * syscall_entry.asm hard-codes 56 for kernel_stack_top. */
     uint64_t kernel_stack_top;
+    const void* wait_channel;
+    struct task* parent;
+    int32_t exit_code;
+    uint64_t heap_start;
+    uint64_t heap_end;
+    uint64_t heap_limit;
+    uint64_t mmap_base;
+    uint64_t mmap_next;
+    struct vm_mapping* mappings;
 
     /* Ring-3 state used by the exec/spawn machinery (exec.c) */
     uint64_t user_entry;      /* ring-3 entry point (syscall ABI-safe) */
@@ -36,30 +48,45 @@ typedef struct task {
     vfs_file_t* fds[VFS_FD_MAX];
 } task_t;
 
+/** Initialize the boot task and scheduler state. */
 void process_init(void);
+/** Create and enqueue a kernel task; returns NULL if allocation fails. */
 task_t* process_create(void (*entry_point)(void));
+/** Block the current task for the requested number of milliseconds. */
 void process_sleep(uint32_t ms);
+/** Terminate the current task with status zero and never return. */
 void process_exit(void);
+/** Print the scheduler's task list to the console. */
 void process_print_list(void);
+/** Schedule another runnable task if one is available. */
 void schedule(void);
+/** Enter ring 3 at entry_point with the supplied user stack. */
 void process_enter_user(void* entry_point, void* user_stack_top);
 
-/* ---- new primitives ---- */
-
+/** @return The currently running task, or NULL before scheduler setup. */
 task_t* process_current_task(void);
-
-/* Park the current task until process_wakeup() (used for blocking I/O,
- * e.g. SYS_READ on the keyboard). Requires IF off; takes the CPU away. */
+/** Park the current task until explicitly woken. */
 void process_block(void);
-
-/* IRQ-safe: move a BLOCKED task back to READY (no preemptive reschedule). */
+/** Park the current task on a wait channel until that channel is woken. */
+void process_block_on(const void* channel);
+/** Make a blocked task runnable without immediately rescheduling. */
 void process_wakeup(task_t* task);
-
-/* Terminate the current task: release fds/address space/args, switch away.
- * Never returns. */
-void process_kill_current(void);
-
-/* Attach the default fd set (0 keyboard, 1+2 console) to a task. */
-void process_fd_defaults(task_t* task);
+/** Wake tasks parked on the specified channel. */
+void process_wakeup_channel(const void* channel);
+/** Release current-task resources, record status, and switch away. */
+void process_kill_current(int32_t exit_code);
+/** Clone the current user task, including its user mappings and descriptors. */
+int64_t process_fork(struct syscall_frame* frame);
+/**
+ * Wait for a matching child, block until it exits, and reap it.
+ * @param status Receives the child's raw exit code, if non-NULL.
+ * @return Reaped child PID, or -1 if there is no matching child.
+ */
+int64_t process_waitpid(int64_t pid, int32_t* status);
+/**
+ * Install descriptors 0 (keyboard), 1 (console), and 2 (console).
+ * Rejects occupied tables; allocation failure leaves an initially empty table.
+ */
+int process_fd_defaults(task_t* task);
 
 #endif
